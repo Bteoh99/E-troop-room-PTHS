@@ -118,8 +118,10 @@ export function buildImportPlan(rows) {
     const condText = text('condition');
     if (condText) {
       const { condition, recognized } = mapCondition(condText);
-      data.condition = condition;
-      if (!recognized) warnings.push(`Warning: unknown condition "${condText}"; imported as good`);
+      // Unknown text is treated like a bad quantity: existing items keep their condition,
+      // new items get the default (good).
+      if (recognized) data.condition = condition;
+      else warnings.push(`Warning: unknown condition "${condText}"; existing item keeps its condition, new item gets good`);
     }
 
     const parsed = updateItemSchema.safeParse(data);

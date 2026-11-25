@@ -70,7 +70,7 @@ tests/                  vitest + supertest
   becomes notes if there is no notes column).
 - Uses the first visible sheet that has code + name headers.
 - Rows missing code or name → error, skipped. Blank rows ignored. Odd locations are kept as text
-  (warning). Unknown condition → `good` (warning). Bad quantity → warning, quantity unchanged
+  (warning). Unknown condition → warning; existing items keep theirs, new items get `good`. Bad quantity → warning, quantity unchanged
   (1 for new items). `"5 pcs"` → quantity 5, unit `pcs`. Location > 100 chars → warning, not changed.
 - Upsert by code (case-insensitive). **Blank cells and missing columns never change an existing item**;
   new items get the defaults. Counts are per distinct code: `created`, `updated`, `unchanged`
@@ -78,5 +78,8 @@ tests/                  vitest + supertest
 - A real import runs in a single transaction; a dry run writes nothing.
 - Memory safety: before ExcelJS loads a workbook, `src/lib/xlsxGuard.js` reads the zip directory and
   inflates each entry with a hard cap, rejecting workbooks over 25,000 rows / 240,000 cells / 48 MB of
-  XML (ExcelJS needs ~0.75 KB per cell, so the worst accepted file peaks around 200 MB). CSV parsing
-  stops early past the row limit.
+  XML (ExcelJS needs ~0.75 KB per cell, so the worst accepted file peaks around 200 MB). Rows, cells and
+  shared strings are counted in every zip entry with a namespace/whitespace-tolerant regex, and entry
+  names are normalized like ExcelJS does (leading `/`). CSV parsing stops early past the row limit.
+- One import runs at a time per process (`runExclusive` in `src/services/importer.js`); up to 2 more
+  wait, further requests get 429.

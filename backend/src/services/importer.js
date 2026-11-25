@@ -7,8 +7,8 @@ import { ZodError } from 'zod';
 import { parseCsv, decodeText } from '../lib/csv.js';
 import { buildImportPlan } from '../lib/importRows.js';
 import { findHeaderRow } from '../lib/headers.js';
-import { badRequest } from '../lib/errors.js';
-import { checkXlsx, XLSX_LIMITS } from '../lib/xlsxGuard.js';
+import { badRequest, HttpError } from '../lib/errors.js';
+import { checkXlsx } from '../lib/xlsxGuard.js';
 import { updateItemSchema } from '../lib/itemSchema.js';
 import { buildNewItem, createItem, getItemByCode, mergeItem, updateItem } from './items.js';
 
@@ -43,13 +43,12 @@ export async function readSpreadsheet(buffer, ext) {
   if (ext === '.csv') {
     try {
       // +200 leaves room for title/blank rows above the header; the exact check is in importItems.
-      return parseCsv(decodeText(buffer), undefined, { maxRows: MAX_IMPORT_ROWS + 200, maxCells: XLSX_LIMITS.maxCells })
+      // No cell cap for CSV: plain strings are cheap, and the 5 MB upload limit bounds them.
+      return parseCsv(decodeText(buffer), undefined, { maxRows: MAX_IMPORT_ROWS + 200 })
         .map((cells, i) => ({ rowNumber: i + 1, cells }));
     } catch (err) {
       if (err instanceof RangeError) {
-        throw err.message === 'CSV_TOO_MANY_ROWS'
-          ? tooManyRows()
-          : badRequest('The CSV file has too many cells to import. Delete unused columns.');
+        throw tooManyRows();
       }
       throw err;
     }
@@ -109,7 +108,34 @@ const sameItem = (a, b) => COMPARED.every((k) => a[k] === b[k]);
  * item: later rows are applied on top of earlier ones (warning), and its single preview entry
  * shows the final result.
  */
-export async function importItems(db, buffer, { ext, dryRun }) {
+export function importItems(db, buffer, opts) {
+  return runExclusive(() => importItemsNow(db, buffer, opts));
+}
+
+/**
+ * One import (dry run or real) at a time per process: each workbook load is CPU- and memory-heavy.
+ * Up to IMPORT_QUEUE_LIMIT further requests wait their turn; beyond that -> 429.
+ */
+export const IMPORT_QUEUE_LIMIT = 2;
+let importActive = false;
+const importWaiting = [];
+export async function runExclusive(fn) {
+  if (importActive) {
+    if (importWaiting.length >= IMPORT_QUEUE_LIMIT) {
+      throw new HttpError(429, 'Another import is being processed. Please try again in a moment.');
+    }
+    await new Promise((resolve) => importWaiting.push(resolve));
+  } else importActive = true;
+  try {
+    return await fn();
+  } finally {
+    const next = importWaiting.shift();
+    if (next) next(); // hand the lock straight to the next waiter
+    else importActive = false;
+  }
+}
+
+async function importItemsNow(db, buffer, { ext, dryRun }) {
   const rows = await readSpreadsheet(buffer, ext);
   if (rows.length === 0) throw badRequest('The file is empty.');
   const plan = buildImportPlan(rows);
@@ -118,41 +144,43 @@ export async function importItems(db, buffer, { ext, dryRun }) {
   const errors = [...plan.errors];
   let skipped = plan.skipped;
 
-  const run = () => {
-    const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (current) }
-    for (const { row, data } of plan.records) {
-      const code = data.code.toUpperCase();
-      let entry = byCode.get(code);
-      const original = entry ? entry.original : getItemByCode(db, code);
-      const current = entry ? entry.item : original;
-      let item;
-      try {
-        if (!current) item = dryRun ? buildNewItem(data) : createItem(db, data);
-        else {
-          const merged = mergeItem(current, updateItemSchema.parse(data));
-          // Skip the write (and the updatedAt bump) when nothing changes.
-          item = dryRun || sameItem(merged, current) ? merged : updateItem(db, current.id, data);
-        }
-      } catch (err) {
-        if (!(err instanceof ZodError)) throw err;
-        const msg = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
-        errors.push({ row, message: `${msg}; row skipped` });
-        skipped++;
-        continue;
-      }
-      if (entry) {
-        errors.push({ row, message: `Warning: code ${code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
-        entry.item = item;
-        entry.lastRow = row;
-      } else {
-        entry = { firstRow: row, lastRow: row, original, item };
-        byCode.set(code, entry);
-      }
+  // 1) Work out every code's final state in memory (identical for dry and real runs).
+  const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (final) }
+  for (const { row, data } of plan.records) {
+    const code = data.code.toUpperCase();
+    const entry = byCode.get(code);
+    const original = entry ? entry.original : getItemByCode(db, code);
+    const current = entry ? entry.item : original;
+    let item;
+    try {
+      item = current ? mergeItem(current, updateItemSchema.parse(data)) : buildNewItem(data);
+    } catch (err) {
+      if (!(err instanceof ZodError)) throw err;
+      const msg = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+      errors.push({ row, message: `${msg}; row skipped` });
+      skipped++;
+      continue;
     }
-    return byCode;
-  };
+    if (entry) {
+      errors.push({ row, message: `Warning: code ${code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
+      entry.item = item;
+      entry.lastRow = row;
+    } else {
+      byCode.set(code, { firstRow: row, lastRow: row, original, item });
+    }
+  }
 
-  const byCode = dryRun ? run() : db.transaction(run)();
+  // 2) Real run: one write per code, all in one transaction. Unchanged items are not written,
+  //    even when several rows changed them and changed them back.
+  if (!dryRun) {
+    db.transaction(() => {
+      for (const entry of byCode.values()) {
+        const values = Object.fromEntries(COMPARED.map((k) => [k, entry.item[k]]));
+        if (!entry.original) entry.item = createItem(db, values);
+        else if (!sameItem(entry.original, entry.item)) entry.item = updateItem(db, entry.original.id, values);
+      }
+    })();
+  }
 
   const result = {
     dryRun,

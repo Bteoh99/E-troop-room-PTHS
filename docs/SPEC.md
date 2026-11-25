@@ -74,8 +74,10 @@ Errors: `{ "error": { "message": string, "details"?: any } }` with proper status
   - Each `preview` entry also has `row` (sheet row number, first row of that code), `action` (`"create" | "update" | "unchanged"`) and `id` (null only for new items).
   - Entries in `errors` whose message starts with `Warning:` are warnings: the row was still imported and is **not** counted in `skipped`.
   - **A blank cell never changes an existing item** (any field); new items get the defaults. So an import cannot clear a field: use the edit screen for that. Columns absent from the file are also left unchanged.
+  - Unknown condition text → warning; an **existing item keeps its condition**, a new item gets `good` (same rule as a bad quantity).
   - A location longer than 100 characters → warning, location left unchanged (null for new items); via the API it is still a 400.
-  - Errors: no recognisable code + name columns → 400 (`details.missingColumns`, `details.headersFound`); wrong type, malformed upload, or a workbook too big once unpacked (more than 25,000 rows, 240,000 cells or 48 MB of XML) → 400; more than 20,000 data rows → 400; > 5 MB → 413.
+  - One import (dry run or real) is processed at a time per server; up to 2 more wait their turn, beyond that → **429** `{ error: { message } }` (frontend: show "try again in a moment").
+  - Errors: no recognisable code + name columns → 400 (`details.missingColumns`, `details.headersFound`); wrong type, malformed upload, or a workbook too big once unpacked (more than 25,000 rows, 240,000 cells or 48 MB of XML; CSV has no cell cap) → 400; more than 20,000 data rows → 400; > 5 MB → 413.
 - Malformed JSON / unsupported charset / malformed multipart → 400 with the standard error shape.
 - Phase 2 note: `DELETE /api/items/:id` is a hard delete. Before loans reference `items.id`, switch to `ON DELETE RESTRICT` + map the FK error to 409, or soft delete.
 

@@ -23,20 +23,17 @@ const EOCD_SIG = 0x06054b50;
 const CEN_SIG = 0x02014b50;
 const LOC_SIG = 0x04034b50;
 
-function countOccurrences(buf, needles) {
+// Tolerant of whitespace after the tag name and of any namespace prefix ("<row\n", "<x:row ", "<c/>").
+const ROW_RE = /<(?:[\w.-]+:)?row[\s>\/]/g;
+const CELL_RE = /<(?:[\w.-]+:)?c[\s>\/]/g;
+const SI_RE = /<(?:[\w.-]+:)?si[\s>\/]/g;
+
+function countTags(text, re) {
+  re.lastIndex = 0;
   let n = 0;
-  for (const needle of needles) {
-    let i = buf.indexOf(needle);
-    while (i !== -1) {
-      n++;
-      i = buf.indexOf(needle, i + needle.length);
-    }
-  }
+  while (re.exec(text) !== null) n++;
   return n;
 }
-const ROW_TAGS = [Buffer.from('<row '), Buffer.from('<row>'), Buffer.from('<x:row '), Buffer.from('<x:row>')];
-const CELL_TAGS = [Buffer.from('<c '), Buffer.from('<c>'), Buffer.from('<x:c '), Buffer.from('<x:c>')];
-const SI_TAGS = [Buffer.from('<si>'), Buffer.from('<si '), Buffer.from('<x:si>'), Buffer.from('<x:si ')];
 
 /** List zip entries from the central directory. Throws 400 if this is not a readable zip. */
 export function listZipEntries(buf) {
@@ -64,7 +61,8 @@ export function listZipEntries(buf) {
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
     const localOffset = buf.readUInt32LE(p + 42);
-    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
+    // Normalized the way ExcelJS reads them: no leading slashes / backslashes.
+    const name = buf.toString('utf8', p + 46, p + 46 + nameLen).replace(/\\/g, '/').replace(/^\/+/, '');
     entries.push({ name, method, compressedSize, size, localOffset });
     p += 46 + nameLen + extraLen + commentLen;
   }
@@ -111,12 +109,13 @@ export function checkXlsx(buf, limits = XLSX_LIMITS) {
     const cap = Math.min(limits.maxEntryBytes, limits.maxTotalBytes - bytes);
     const out = inflateEntry(buf, entry, cap);
     bytes += out.length;
-    if (/^xl\/worksheets\/[^/]+\.xml$/i.test(entry.name)) {
-      rows += countOccurrences(out, ROW_TAGS);
-      cells += countOccurrences(out, CELL_TAGS);
-    } else if (/^xl\/sharedStrings\.xml$/i.test(entry.name)) {
-      sharedStrings += countOccurrences(out, SI_TAGS);
-    }
+    // Count in EVERY entry rather than picking worksheets by name: ExcelJS strips a leading "/" and
+    // matches sheet names loosely, so a renamed entry must not escape the count. Real tags can't
+    // appear in text (XML escapes "<"), so counting everywhere only adds noise from binary parts.
+    const text = out.toString('latin1');
+    rows += countTags(text, ROW_RE);
+    cells += countTags(text, CELL_RE);
+    sharedStrings += countTags(text, SI_RE);
     if (rows > limits.maxRows) {
       throw badRequest(`Too many rows in the workbook (more than ${limits.maxRows}). Split it into smaller files.`);
     }

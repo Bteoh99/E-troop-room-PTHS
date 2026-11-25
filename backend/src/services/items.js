@@ -190,7 +190,7 @@ export function listItems(db, { q, category, rack, condition } = {}) {
       params.loc = whole.locationCode;
       where.push(`(${locationMatch(whole, params, 'w')} OR ${contains(TEXT_FIELDS, 'ql')})`);
     } else {
-      const tokens = [...new Set(ql.split(' '))].slice(0, 8);
+      const tokens = [...new Set(ql.split(' '))]; // q is at most 200 chars, so this stays small
       tokens.forEach((t, i) => {
         params[`t${i}`] = t;
         const loc = asCoordinate(t);
@@ -212,10 +212,22 @@ export function listItems(db, { q, category, rack, condition } = {}) {
   return db.prepare(sql).all(params).map(rowToItem);
 }
 
+/** Distinct categories with counts, grouped case-insensitively (Unicode-aware, like the filter). */
 export function listCategories(db) {
-  return stmt(db, `SELECT MIN(category) AS name, COUNT(*) AS count FROM items
-      WHERE category IS NOT NULL AND category <> ''
-      GROUP BY category COLLATE NOCASE ORDER BY name COLLATE NOCASE`).all();
+  const groups = new Map(); // folded -> { name, count }
+  for (const { name, count } of stmt(db, `SELECT category AS name, COUNT(*) AS count FROM items
+      WHERE category IS NOT NULL AND category <> '' GROUP BY category`).all()) {
+    const key = name.toLowerCase();
+    const g = groups.get(key);
+    if (!g) groups.set(key, { name, count });
+    else {
+      g.count += count;
+      if (name < g.name) g.name = name; // stable display name: the smallest spelling
+    }
+  }
+  return [...groups.entries()]
+    .sort(([a, ga], [b, gb]) => (a < b ? -1 : a > b ? 1 : ga.name < gb.name ? -1 : 1))
+    .map(([, g]) => g);
 }
 
 const rackNumber = (r) => Number(r.replace(/^R/, ''));

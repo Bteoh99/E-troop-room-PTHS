@@ -238,3 +238,85 @@ transactional import, consistent error shape, good test seams). The two Major is
 locations or statuses silently, which defeats the purpose of Phase 1 ("see which rack it is in"). Both
 fixes are small and local. m1–m6 should be fixed before the real quartermaster file is imported (m3 and
 m6 especially, since real spreadsheets are likely to hit them). The Nits can wait until Phase 2.
+
+---
+
+## Round 2 verification (commit `b27ebb9`)
+
+How I checked: I re-read every changed file in `backend/src` and ran the full vitest suite
+(9 files, 405 tests, all passing). I re-ran every Round 1 reproduction against a fresh server
+(`PORT=3101`, temp `DB_PATH`, seeded, stopped afterwards). I also tried to get past the new
+`xlsxGuard.js`.
+
+### Status of Round 1 findings
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| M1 | Shelf/bin keyword read as a rack | **Fixed** | `Bin 5`, `Level 2`, `Shelf 3`, `Slot 7`, `Petak 1`, `Pos 3`, `No. 4` and `Tingkat 2` are now kept as text (rack null). `Rack No. 3`, `Rak 3 Tingkat B Petak 2` and `R03 B No 2` still parse. `normalizeRack("bin 3")` returns null, so `/api/racks/bin%203` → 400. `q=bin 2` no longer returns rack R02. |
+| M2 | Blank cells wipe existing data | **Fixed** | I re-imported the Round 1 file with `dryRun=false`. CKG-012 kept `damaged` and its notes, TNT-001 kept `R01-A-1`, and both were reported as `unchanged`. `updatedAt` was not changed. |
+| m1 | Compressed `.xlsx` loaded before limits | **Partially fixed** | The normal-name file is now rejected in 0.2 s with about 140 MB peak memory. The guard can be bypassed, though: see **R2-1**. |
+| m2 | 500 for busboy/body-parser client errors | **Fixed** | Truncated multipart → 400. Missing boundary → 400. `charset=latin2` → 400. An unknown `Content-Encoding` → 400. All use the standard error shape. |
+| m3 | Duplicate columns dropped silently | **Fixed** | For `ID,Code,Name,Description,Remarks,Keterangan`, `ignoredColumns` lists ID, Description and Keterangan as duplicates. With `Kod,Nama,Lokasi,Keterangan`, Keterangan becomes `notes` ("Zip rosak"). |
+| m4 | Coordinate search imprecision | **Fixed** | `q=R03-B-1` no longer returns R03-B-10. `tent r1` and `r3 rope` work. In `q=R03-A-1`, the exact-location item ranks above a notes-only match. Unicode matching works (`öl` and `ÖLFASS` both find "Ölfass"). |
+| m5 | Duplicate code counted twice | **Fixed** | NEW-1 on rows 5 and 6 → `created: 1`, a single preview entry (row 5, final values), and one warning. |
+| m6 | En/em dashes rejected | **Fixed** | `R03–B–2` and `R03—B—2` → `R03-B-2`. |
+| n1 | `headersFound` shows title row | **Fixed** | It now shows `["Kod","Barang X"]`. |
+| n2 | Lenient quantity/id coercion | **Fixed** | `quantity:"0x10"` → 400. `/items/1e2` and `/items/0` → 400. In the import, `"0x10"` now gives a warning and the quantity is left unchanged. |
+| n3 | Migration race | **Fixed** | The step runs in `.immediate()` and the version is re-read inside the transaction. |
+| n4 | `app.js` import side effect | **Fixed** | The default app is created lazily. `server.js` opens its own DB. No test uses `app.locals` or `app.listen`. |
+| n5 | No-op rows reported as updated | **Fixed** | There is a new `unchanged` count. The write and the `updatedAt` change are skipped when nothing differs. |
+| n6 | Numeric shelves from separate columns | **Not fixed (deferred)** | `3`/`2`/`1` columns still become the text `"3-2-1"` with a warning. This follows the spec. Revisit when the real file arrives. |
+| n7 | Hard delete for Phase 2 | **Acknowledged** | It is documented as a Phase 2 note in SPEC.md, which is fine for now. |
+
+### New findings
+
+#### R2-1 (Minor) — `xlsxGuard` counts rows by entry name and exact tag bytes, so it is easy to get past
+`backend/src/lib/xlsxGuard.js:37-38, 114-118`
+
+**Problem.** The guard only counts rows and cells in entries matching `^xl\/worksheets\/[^/]+\.xml$`,
+and only the byte patterns `<row ` / `<row>` and `<c ` / `<c>`. ExcelJS reads the zip differently in
+two ways:
+- It strips a leading `/` from entry names and matches worksheets with the **unanchored**
+  `/xl\/worksheets\/sheet(\d+)[.]xml/` (`node_modules/exceljs/lib/xlsx/xlsx.js:284, 361`).
+- Its XML parser accepts any whitespace after the tag name, for example `<row\nr="1">`.
+
+**Verified.** I took a 2.9 MB workbook with 2 × 175,000 rows. With normal names it is rejected by the
+guard in 0.2 s. I then built two variants: one with the sheet entries renamed to
+`/xl/worksheets/sheetN.xml`, and one with `<row ` / `<c ` replaced by `<row\n` / `<c\n`. For both,
+`checkXlsx` returned `{ rows: 0, cells: 0 }`. ExcelJS then loaded all 350k rows before the 20,000-row
+check: 5 s and **764 MB** peak RSS per request, and **1.84 GB** with three uploads at once.
+
+The 48 MB uncompressed cap still bounds each request, so this is better than Round 1. Even so, the
+guard's own target (about 190 MB) is easily exceeded by a deliberately crafted file. Normal Excel
+output is not affected.
+
+**Fix.**
+- Count the tags with a regex that allows whitespace and an optional prefix, e.g.
+  `/<(?:[\w.-]+:)?row[\s>\/]/g` and `/<(?:[\w.-]+:)?c[\s>\/]/g`.
+- Run it on **every** inflated entry instead of choosing entries by name. Alternatively, normalise
+  names the way ExcelJS does (strip a leading `/`, unanchored match).
+- Optionally allow only one import at a time, since each load is CPU- and memory-heavy.
+
+#### R2-2 (Nit) — the 240,000-cell cap also applies to CSV and counts empty cells
+`backend/src/services/importer.js:46`, `xlsxGuard.js:116`
+
+The cell cap exists because ExcelJS uses about 0.75 KB per cell. It is also applied to CSV, which is
+parsed into plain strings and doesn't need it. Empty trailing cells count too: a CSV with 1,000 rows
+× 302 mostly-empty columns is rejected with "too many cells". The same goes for any file over 12
+columns × 20,000 rows. The limit is documented in SPEC.md and a scout troop will not hit it, so this is
+a Nit. If it is kept, consider dropping the cap for CSV, or counting only non-empty cells there.
+
+#### R2-3 (Nit) — unknown condition text still overwrites an existing item's condition with `good`
+`backend/src/lib/importRows.js:118-123`
+
+"A blank cell never changes an existing item" now holds. But for an existing `damaged` item, a
+condition cell with unrecognised text (e.g. `rosak teruk sekali`) still sets it to `good`, with a
+warning. That follows the spec ("unknown → good + warning"), but it no longer matches how quantity is
+handled ("not a whole number → left unchanged"). Suggestion: for existing items, keep the current
+condition and say so in the warning. Update the spec line if this is adopted.
+
+### Round 2 verdict
+**Approve.** Both Major findings and Minors m2–m6 are fixed, and I verified each one against the
+running server. The new import counts and the "blank never changes" rule work, and all 405 tests pass.
+The one remaining item worth doing before the app is exposed beyond trusted users is **R2-1**, a
+one-line regex change plus dropping the entry-name filter. R2-2 and R2-3 are optional.

@@ -259,3 +259,120 @@ describe('nits', () => {
     expect(res.body.error.details.headersFound).toEqual(['Kod', 'Barang X']);
   });
 });
+
+// ---- Round 3 (REVIEW-backend.md "Round 2 verification": R2-1, R2-3) ----
+import zlib from 'node:zlib';
+import ExcelJS from 'exceljs';
+import { listZipEntries } from '../src/lib/xlsxGuard.js';
+import { runExclusive, IMPORT_QUEUE_LIMIT } from '../src/services/importer.js';
+
+/** Unpack a zip buffer into [{ name, data }] (test helper, stored/deflate only). */
+function unzip(buf) {
+  return listZipEntries(buf).map((e) => {
+    const p = e.localOffset;
+    const start = p + 30 + buf.readUInt16LE(p + 26) + buf.readUInt16LE(p + 28);
+    const raw = buf.subarray(start, start + e.compressedSize);
+    return { name: e.name, data: e.method === 8 ? zlib.inflateRawSync(raw) : Buffer.from(raw) };
+  });
+}
+
+/** Write [{ name, data }] as a deflate zip (test helper). */
+function zip(files) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const { name, data } of files) {
+    const n = Buffer.from(name, 'utf8');
+    const comp = zlib.deflateRawSync(data);
+    const crc = zlib.crc32(data);
+    const loc = Buffer.alloc(30);
+    loc.writeUInt32LE(0x04034b50, 0); loc.writeUInt16LE(20, 4); loc.writeUInt16LE(8, 8);
+    loc.writeUInt32LE(crc, 14); loc.writeUInt32LE(comp.length, 18); loc.writeUInt32LE(data.length, 22);
+    loc.writeUInt16LE(n.length, 26);
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(8, 10);
+    cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(comp.length, 20); cen.writeUInt32LE(data.length, 24);
+    cen.writeUInt16LE(n.length, 28); cen.writeUInt32LE(offset, 42);
+    locals.push(loc, n, comp);
+    centrals.push(cen, n);
+    offset += 30 + n.length + comp.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+
+describe('R2-1: xlsxGuard cannot be bypassed by entry names or tag spelling', () => {
+  const limits = { ...XLSX_LIMITS, maxRows: 10, maxCells: 1000 };
+  let original;
+  beforeEach(async () => {
+    const rows = [['Code', 'Name']];
+    for (let i = 0; i < 30; i++) rows.push([`C${i}`, 'x']);
+    original = await xlsx(rows);
+  });
+  const rowsSeenByExcelJS = async (buf) => {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    return wb.worksheets[0].actualRowCount;
+  };
+
+  it('baseline: the normal file is over the row cap', () => {
+    expect(() => checkXlsx(original, limits)).toThrow(/Too many rows/);
+  });
+
+  it('entry names with a leading "/" are still counted', async () => {
+    const renamed = zip(unzip(original).map((f) => ({ ...f, name: `/${f.name}` })));
+    expect(await rowsSeenByExcelJS(renamed)).toBe(31); // the trick is real: ExcelJS reads these rows
+    expect(() => checkXlsx(renamed, limits)).toThrow(/Too many rows/);
+  });
+
+  it('tags written as "<row\\n" / "<c\\n" are still counted', async () => {
+    const respaced = zip(unzip(original).map((f) => (/worksheets\//.test(f.name)
+      ? { ...f, data: Buffer.from(f.data.toString('utf8').replace(/<row /g, '<row\n').replace(/<c /g, '<c\n')) }
+      : f)));
+    expect(await rowsSeenByExcelJS(respaced)).toBe(31);
+    expect(() => checkXlsx(respaced, limits)).toThrow(/Too many rows/);
+  });
+
+  it('namespaced tags ("<x:row", "<x:c") are counted too', () => {
+    const ns = zip(unzip(original).map((f) => (/worksheets\//.test(f.name)
+      ? { ...f, data: Buffer.from(f.data.toString('utf8').replace(/<row[\s>]/g, (m) => `<x:row${m.slice(4)}`)) }
+      : f)));
+    expect(() => checkXlsx(ns, limits)).toThrow(/Too many rows/);
+  });
+});
+
+describe('R2-1: only one import is processed at a time', () => {
+  it('queues up to IMPORT_QUEUE_LIMIT, runs them in order, then answers 429', async () => {
+    let release;
+    const order = [];
+    const first = runExclusive(() => new Promise((r) => { release = r; }).then(() => order.push('first')));
+    const queued = Array.from({ length: IMPORT_QUEUE_LIMIT }, (_, i) => runExclusive(async () => order.push(`q${i}`)));
+    await expect(runExclusive(async () => 'too many')).rejects.toMatchObject({ status: 429 });
+    release();
+    await Promise.all([first, ...queued]);
+    expect(order).toEqual(['first', ...queued.map((_, i) => `q${i}`)]);
+    expect(await runExclusive(async () => 'free again')).toBe('free again');
+  });
+
+  it('a failing import releases the lock', async () => {
+    await expect(runExclusive(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(await runExclusive(async () => 'ok')).toBe('ok');
+  });
+});
+
+describe('R2-3: unknown condition text keeps an existing item\'s condition', () => {
+  it('existing damaged item stays damaged (warning); new item gets good', async () => {
+    const { app, db } = makeApp();
+    await createItems(app, [{ code: 'CKG-012', name: 'Jerry can', condition: 'damaged' }]);
+    const res = await upload(app, csv([['Code', 'Name', 'Keadaan'], ['CKG-012', 'Jerry can', 'rosak teruk sekali'], ['NEW-1', 'New', 'shiny']]), 'a.csv', real);
+    expect(res.body).toMatchObject({ created: 1, updated: 0, unchanged: 1, skipped: 0 });
+    expect(res.body.errors.map((e) => e.row)).toEqual([2, 3]);
+    expect(res.body.errors.every((e) => e.message.startsWith('Warning:'))).toBe(true);
+    const rows = allItems(db);
+    expect(rows.find((r) => r.code === 'CKG-012').condition).toBe('damaged');
+    expect(rows.find((r) => r.code === 'NEW-1').condition).toBe('good');
+  });
+});
