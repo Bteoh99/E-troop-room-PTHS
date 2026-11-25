@@ -133,9 +133,10 @@ describe('Import page', () => {
     const preview = screen.getByTestId('import-preview');
     const rows = within(preview).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(3);
-    expect(rows[0]).toHaveTextContent(/2\s*Add new\s*TNT-100\s*Big tent\s*R03-B-2\s*Tents\s*2 pcs\s*Good/);
+    // Lead decision (round 3, n6): Location comes right after Code.
+    expect(rows[0]).toHaveTextContent(/2\s*Add new\s*TNT-100\s*R03-B-2\s*Big tent\s*Tents\s*2 pcs\s*Good/);
     expect(rows[1]).toHaveTextContent(/Update.*TNT-004.*Needs repair/);
-    expect(rows[2]).toHaveTextContent(/MSC-1\s*Bucket\s*—/);
+    expect(rows[2]).toHaveTextContent(/MSC-1\s*—\s*Bucket/); // n6: no location, shown right after the code
     expect(screen.getByText(/First 3 rows as they will be saved/)).toBeInTheDocument();
     // Nothing written yet.
     expect(m.importFile).toHaveBeenCalledTimes(1);
@@ -206,7 +207,10 @@ describe('Import page', () => {
     const user = await choose(file);
     await user.click(await screen.findByRole('button', { name: 'Confirm import' }));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('The import did not finish — nothing was saved');
+    // Lead decision (round 3, n4): a dropped connection may still have committed, so don't claim nothing was saved.
+    expect(alert).toHaveTextContent(
+      "We couldn't confirm whether the import finished — search for one of the items to check before importing again",
+    );
     await user.click(within(alert).getByRole('button', { name: 'Try again' }));
     await screen.findByRole('heading', { name: /Import finished/ });
     expect(m.importFile.mock.calls.map((c) => c[1])).toEqual([true, false, false]);

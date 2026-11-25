@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Item } from '../api/types';
 import { shelfRange } from '../lib/location';
 
@@ -19,14 +19,17 @@ export const MAX_DRAWN_BINS = 24;
 
 type Column = { kind: 'bin'; bin: number } | { kind: 'gap'; from: number; to: number };
 
-/** Bin columns to draw: 1..maxBin, or a collapsed list when a rack has very many (or a typo'd huge) bin. */
-function binColumns(maxBin: number, important: Set<number>): Column[] {
-  if (maxBin <= MAX_DRAWN_BINS) {
-    return Array.from({ length: maxBin }, (_, i) => ({ kind: 'bin', bin: i + 1 }));
+/**
+ * Bin columns to draw: firstBin..maxBin, or a collapsed list when a rack has very many (or a typo'd huge) bin.
+ * firstBin is 0 when any item uses bin 0 (the parser accepts "R03-B-0"), otherwise 1.
+ */
+function binColumns(firstBin: number, maxBin: number, important: Set<number>): Column[] {
+  if (maxBin - firstBin + 1 <= MAX_DRAWN_BINS) {
+    return Array.from({ length: maxBin - firstBin + 1 }, (_, i) => ({ kind: 'bin', bin: firstBin + i }));
   }
-  const keep = [...new Set([1, ...important])].filter((b) => b >= 1).sort((a, b) => a - b);
+  const keep = [...new Set([firstBin, 1, ...important])].filter((b) => b >= firstBin).sort((a, b) => a - b);
   const cols: Column[] = [];
-  let prev = 0;
+  let prev = firstBin - 1;
   for (const b of keep) {
     if (b > prev + 1) cols.push({ kind: 'gap', from: prev + 1, to: b - 1 });
     cols.push({ kind: 'bin', bin: b });
@@ -61,7 +64,8 @@ export function RackDiagram({ rack, items, shelves = [], highlightShelf, highlig
     important.add(highlightBin);
     if (highlightBin > maxBin) maxBin = highlightBin;
   }
-  const columns = binColumns(maxBin, important);
+  const firstBin = important.has(0) ? 0 : 1;
+  const columns = binColumns(firstBin, maxBin, important);
 
   const occupied = new Map<string, number>();
   for (const it of items) {
@@ -75,13 +79,42 @@ export function RackDiagram({ rack, items, shelves = [], highlightShelf, highlig
     summary += ` Highlighted: shelf ${highlightShelf}${highlightBin != null ? `, bin ${highlightBin}` : ''}.`;
   }
 
-  // Keep the highlighted bin visible when the rack is wider than the screen.
+  // Which sides have bins scrolled out of view (drives the "more bins" cue).
+  const [hidden, setHidden] = useState({ left: false, right: false });
+  const updateHidden = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    setHidden((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+  }, []);
+
+  // When the rack is wider than the screen: centre the highlighted bin, or (no highlight, e.g. the
+  // rack page) bring the first occupied bin into view, so occupied bins are never all off-screen.
   useLayoutEffect(() => {
     const scroller = scrollRef.current;
-    const hit = scroller?.querySelector<HTMLElement>('[data-highlighted="true"]');
-    if (!scroller || !hit || scroller.scrollWidth <= scroller.clientWidth) return;
-    scroller.scrollLeft = Math.max(0, hit.offsetLeft - scroller.clientWidth / 2 + hit.offsetWidth / 2);
-  }, [rack, highlightShelf, highlightBin, maxBin]);
+    if (!scroller) return;
+    if (scroller.scrollWidth > scroller.clientWidth) {
+      const hit = scroller.querySelector<HTMLElement>('[data-highlighted="true"]');
+      if (hit) {
+        scroller.scrollLeft = Math.max(0, hit.offsetLeft - scroller.clientWidth / 2 + hit.offsetWidth / 2);
+      } else {
+        const occupied = [...scroller.querySelectorAll<HTMLElement>('.rack__bin.has-items')];
+        if (occupied.length > 0) {
+          const first = Math.min(...occupied.map((b) => b.offsetLeft));
+          const label = scroller.querySelector<HTMLElement>('.rack__label');
+          // Leave room for the sticky shelf label on the left.
+          scroller.scrollLeft = Math.max(0, first - (label ? label.offsetWidth + 16 : 0));
+        }
+      }
+    }
+    updateHidden();
+  }, [rack, highlightShelf, highlightBin, maxBin, items.length, updateHidden]);
+
+  useEffect(() => {
+    window.addEventListener('resize', updateHidden);
+    return () => window.removeEventListener('resize', updateHidden);
+  }, [updateHidden]);
 
   const gridTemplateColumns = columns.map((c) => (c.kind === 'gap' ? 'var(--gap-col)' : 'var(--bin-col)')).join(' ');
 
@@ -92,8 +125,13 @@ export function RackDiagram({ rack, items, shelves = [], highlightShelf, highlig
     >
       <figcaption className="visually-hidden">{summary}</figcaption>
       <div className="rack__frame" aria-hidden="true">
-        <div className="rack__title">Rack {rack}</div>
-        <div className="rack__scroll" ref={scrollRef}>
+        <div className="rack__title">
+          <span className="rack__more rack__more--left">{hidden.left ? '◀ more' : ''}</span>
+          <span>Rack {rack}</span>
+          <span className="rack__more rack__more--right">{hidden.right ? 'more bins ▶' : ''}</span>
+        </div>
+        {(hidden.left || hidden.right) && <p className="rack__hint">Swipe sideways to see every bin</p>}
+        <div className="rack__scroll" ref={scrollRef} onScroll={updateHidden}>
           {rows.map((shelf) => {
             const rowHit = shelf === highlightShelf;
             return (

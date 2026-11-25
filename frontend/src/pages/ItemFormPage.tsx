@@ -277,8 +277,12 @@ function ItemForm({ item }: { item: Item | null }) {
 
   /** Back/Cancel on the edit form: return to the item's existing history entry instead of pushing a new one. */
   const backToItem = (e: React.MouseEvent) => {
-    if (item && !isRootEntry(location)) {
-      e.preventDefault();
+    if (!item) return;
+    e.preventDefault();
+    if (isRootEntry(location)) {
+      // Opened directly (bookmark/new tab): replace the form so it never stays in history.
+      navigate(`/items/${item.id}`, { replace: true, state: replaceState(location) });
+    } else {
       navigate(-1);
     }
   };

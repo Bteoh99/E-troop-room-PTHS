@@ -932,11 +932,30 @@ svg {
   min-width: 0;
 }
 .rack__title {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: baseline;
+  gap: 8px;
   font-family: var(--mono);
   font-weight: 800;
-  text-align: center;
   color: var(--wood);
   font-size: 0.9rem;
+}
+/* "More bins" cue for racks wider than the screen (occupied bins are never hidden without it). */
+.rack__more {
+  font-family: system-ui, sans-serif;
+  font-size: 0.8rem;
+  color: var(--green-800);
+  white-space: nowrap;
+}
+.rack__more--right {
+  text-align: right;
+}
+.rack__hint {
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
 }
 /* Wide racks scroll sideways inside the diagram, never the page. */
 .rack__scroll {
@@ -1350,6 +1369,10 @@ a.tile:hover {
   border-radius: var(--radius-sm);
   width: 100%;
   min-height: 56px;
+}
+.file-chosen {
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .file-input::file-selector-button {
   margin-right: 12px;

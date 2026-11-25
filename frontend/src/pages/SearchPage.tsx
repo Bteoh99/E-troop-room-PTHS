@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { ItemCard } from '../components/ItemCard';
 import { SearchIcon } from '../components/Icons';
@@ -23,12 +23,22 @@ export function SearchPage() {
   /** The q value most recently written to / read from the URL. */
   const syncedQuery = useRef(urlQuery);
 
-  // URL -> box: the URL changed from outside (Search tab, logo, Back/Forward), e.g. "/" clears the search.
+  const location = useLocation();
+  /** True while the next location change is one this page made itself (typing, category). */
+  const selfNavigation = useRef(false);
+
+  // URL -> box on every navigation this page didn't make (Search tab, logo, Back/Forward).
+  // Keyed on location.key (not on ?q=) so clicking the Search tab on "/" also clears text that is
+  // still waiting for the debounce; resetting the text restarts the debounce with the URL's value.
   useEffect(() => {
-    if (urlQuery === syncedQuery.current) return;
+    if (selfNavigation.current) {
+      selfNavigation.current = false;
+      return;
+    }
     syncedQuery.current = urlQuery;
     setText(urlQuery);
-  }, [urlQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key]);
 
   // Box -> URL (debounced), so Back from an item returns to the same search.
   // setParams changes identity on every URL change, so read it from a ref: this must run only when `query` changes.
@@ -37,6 +47,7 @@ export function SearchPage() {
   useEffect(() => {
     if (query === syncedQuery.current) return;
     syncedQuery.current = query;
+    selfNavigation.current = true;
     setParamsRef.current(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -58,6 +69,7 @@ export function SearchPage() {
     const next = new URLSearchParams(params);
     if (value) next.set('category', value);
     else next.delete('category');
+    selfNavigation.current = true;
     setParams(next, { replace: true });
   }
 

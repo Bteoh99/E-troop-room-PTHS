@@ -178,6 +178,11 @@ export function ImportPage() {
               aria-describedby={hintId}
               className="file-input"
             />
+            {step.kind !== 'choose' && 'file' in step && (
+              <p className="file-chosen" data-testid="chosen-file">
+                {step.kind === 'checking' ? 'Checking' : 'Selected'}: <strong>{step.file.name}</strong>
+              </p>
+            )}
             <p id={hintId} className="field__hint">
               .xlsx or .csv, up to 5 MB. The first row should be column headings such as Code, Name, Location, Category,
               Qty, Unit, Condition, Notes (Malay headings like Kod, Nama, Lokasi also work).
@@ -301,6 +306,18 @@ function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/** A dropped connection during the real import may still have committed on the server. */
+export const IMPORT_UNCONFIRMED =
+  "We couldn't confirm whether the import finished — search for one of the items to check before importing again";
+
+function errorTitle(step: Extract<Step, { kind: 'error' }>): string {
+  if (step.during === 'check') return "Couldn't check that file";
+  const connectionLost =
+    !(step.error instanceof FileReadError) && step.error instanceof ApiError && step.error.status === 0;
+  // Any answer from the server (4xx/5xx/429) means the single-transaction import was rolled back.
+  return connectionLost ? IMPORT_UNCONFIRMED : 'The import did not finish — nothing was saved';
+}
+
 function ImportErrorBox({
   step,
   onRetry,
@@ -318,7 +335,7 @@ function ImportErrorBox({
   return (
     <div className="status status--error" role="alert">
       <p className="status__title">
-        {step.during === 'check' ? "Couldn't check that file" : 'The import did not finish — nothing was saved'}
+        {errorTitle(step)}
       </p>
       <p>{message}</p>
       {hints.map((h) => (
@@ -375,8 +392,8 @@ function IgnoredColumns({ result }: { result: ImportResult }) {
       <span aria-hidden="true">ℹ️ </span>
       These columns will be ignored:
       <ul className="note__list">
-        {ignored.map((c) => (
-          <li key={c}>
+        {ignored.map((c, i) => (
+          <li key={`${i}-${c}`}>
             <strong>{String(c)}</strong>
           </li>
         ))}
@@ -479,8 +496,8 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
             <th scope="col">Row</th>
             <th scope="col">Action</th>
             <th scope="col">Code</th>
-            <th scope="col">Name</th>
             <th scope="col">Location</th>
+            <th scope="col">Name</th>
             <th scope="col">Category</th>
             <th scope="col">Qty</th>
             <th scope="col">Condition</th>
@@ -492,10 +509,10 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
               <td>{cell(r.row)}</td>
               <td>{actionLabel(r.action)}</td>
               <td className="code">{cell(r.code)}</td>
-              <td>{cell(r.name)}</td>
               <td>
                 <strong>{cell(r.locationCode)}</strong>
               </td>
+              <td>{cell(r.name)}</td>
               <td>{cell(r.category)}</td>
               <td>
                 {cell(r.quantity)} {r.unit ? String(r.unit) : ''}

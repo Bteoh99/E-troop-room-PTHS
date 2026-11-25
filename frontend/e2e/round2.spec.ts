@@ -22,7 +22,9 @@ test('M2: on a rack with many bins the highlighted bin stays readable and in vie
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(vw);
     // The page itself never scrolls sideways.
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
     expect(overflow).toBeLessThanOrEqual(0);
   } finally {
     await request.delete(`/api/items/${item.id}`);
@@ -39,7 +41,9 @@ test('m1: the Search tab clears an active search', async ({ page }) => {
 
 test('M1: after deleting, Back does not land on a "not found" page', async ({ page, request }, info) => {
   const code = `E2E-DEL-${info.project.name}-${Date.now()}`;
-  const res = await request.post('/api/items', { data: { code, name: 'Delete history test', locationCode: 'R02-A-1' } });
+  const res = await request.post('/api/items', {
+    data: { code, name: 'Delete history test', locationCode: 'R02-A-1' },
+  });
   const item = (await res.json()) as { id: number };
   await page.goto('/map');
   await page.goto(`/items/${item.id}`);
@@ -48,4 +52,31 @@ test('M1: after deleting, Back does not land on a "not found" page', async ({ pa
   await expect(page).toHaveURL(/\/$/);
   await page.goBack();
   await expect(page).toHaveURL(/\/map$/);
+});
+
+test('Reviewer R2-1: on the rack page a wide rack shows its first occupied bin and a "more bins" cue', async ({
+  page,
+  request,
+}, info) => {
+  const stamp = `${info.project.name}-${Date.now()}`;
+  const ids: number[] = [];
+  for (const [i, loc] of ['R08-A-20', 'R08-B-24', 'R08-C-22'].entries()) {
+    const res = await request.post('/api/items', {
+      data: { code: `E2E-WIDE-${i}-${stamp}`, name: `Wide ${i}`, locationCode: loc },
+    });
+    ids.push(((await res.json()) as { id: number }).id);
+  }
+  try {
+    await page.goto('/racks/R08');
+    const diagram = page.getByTestId('rack-diagram');
+    const first = diagram.locator('[data-shelf="A"] [data-bin="20"]');
+    await expect(first).toHaveClass(/has-items/);
+    const box = (await first.boundingBox())!;
+    const vw = page.viewportSize()!.width;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(vw);
+    if (vw < 600) await expect(diagram.getByText('Swipe sideways to see every bin')).toBeVisible();
+  } finally {
+    for (const id of ids) await request.delete(`/api/items/${id}`);
+  }
 });
