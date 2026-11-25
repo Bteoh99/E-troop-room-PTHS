@@ -63,6 +63,11 @@ Errors: `{ "error": { "message": string, "details"?: any } }` with proper status
 | POST | `/api/import?dryRun=true\|false` | multipart field `file` (.xlsx or .csv, max 5 MB). Returns `{ "dryRun": bool, "created": n, "updated": n, "skipped": n, "errors": [{ "row": n, "message": string }], "preview": Item-like[] (first 20 rows) }`. Upsert by `code`. Dry run writes nothing. Whole real import runs in one transaction. |
 | GET | `/api/import/template` | downloads `item-template.xlsx` with header row + 2 example rows |
 
+### Backend implementation notes (additive; nothing in the table above changed)
+- `GET /api/items`: `q` with several words matches items containing **all** words; a coordinate-like `q` (`r3-b`, `R3 B 2`) also matches the normalized `locationCode`. `rack` filter accepts `3`, `r3`, `R03`. Invalid `condition` → 400.
+- `GET /api/racks/:rack`: accepts `r3` / `3`; **404** if the rack has no items, 400 if not a rack. Response also has `"unshelved": Item[]` (items with a rack but no shelf, e.g. location `R03`).
+- `POST /api/import`: `dryRun` **defaults to `true`** when omitted (pass `dryRun=false` to write). Extra response fields: `headerRow` (sheet row of the detected header), `columns` (field → column index), `ignoredColumns` (unrecognised headers). Each `preview` entry also has `row` (sheet row number), `action` (`"create"|"update"`) and `id` (null for new items). Entries in `errors` whose message starts with `Warning:` are warnings — the row was still imported and is **not** counted in `skipped`. Upsert only overwrites fields whose column exists in the file. A file without recognisable code + name columns → 400 (`details.missingColumns`, `details.headersFound`); wrong type → 400; > 5 MB → 413.
+
 ### Excel column mapping (header row, case/space-insensitive)
 The quartermaster's real file will arrive later, so be flexible. Map these header aliases:
 - code: `code`, `item code`, `itemcode`, `kod`, `kod item`, `id`
