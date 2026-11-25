@@ -1,27 +1,33 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
+import { PageHeading } from '../components/PageHeading';
+import { showFlash } from '../lib/flash';
+import { isRootEntry } from '../lib/history';
 import type { Item } from '../api/types';
 import { ConditionChip } from '../components/ConditionChip';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ChevronLeftIcon } from '../components/Icons';
 import { LocationBadge } from '../components/LocationBadge';
 import { RackDiagram } from '../components/RackDiagram';
-import { EmptyState, ErrorState, Loading, isNotFound } from '../components/StatusViews';
+import { EmptyState, ErrorState, Loading, isNotFound, notFoundError } from '../components/StatusViews';
 import { StoreMap } from '../components/StoreMap';
 import { useAsync } from '../hooks/useAsync';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 
 export function ItemDetailPage() {
   const { id = '' } = useParams();
-  const item = useAsync((signal) => api.getItem(id, signal), [id]);
+  const item = useAsync(
+    (signal) => (/^\d+$/.test(id) ? api.getItem(id, signal) : Promise.reject(notFoundError())),
+    [id],
+  );
   useDocumentTitle(item.status === 'success' ? item.data.name : 'Item');
 
   if (item.status === 'loading') return <Loading label="Loading item…" />;
   if (item.status === 'error') {
     if (isNotFound(item.error)) {
       return (
-        <EmptyState title="We couldn't find that item" icon="🧭">
+        <EmptyState title="We couldn't find that item" icon="🧭" pageHeading>
           <p>It may have been deleted, or the link is wrong.</p>
           <Link to="/" className="btn btn--primary">
             Back to search
@@ -46,7 +52,9 @@ function ItemDetail({ item }: { item: Item }) {
     setDeleteError(null);
     try {
       await api.deleteItem(item.id);
-      navigate('/', { state: { flash: `Deleted “${item.name}” (${item.code}).` } });
+      showFlash(`Deleted “${item.name}” (${item.code}).`);
+      // Replace: the deleted item's page must not stay in history (Back would show "not found").
+      navigate('/', { replace: true });
     } catch (err) {
       setDeleting(false);
       setConfirmOpen(false);
@@ -61,7 +69,7 @@ function ItemDetail({ item }: { item: Item }) {
         className="back-link"
         onClick={(e) => {
           // Prefer real Back (keeps the previous search text) when there is in-app history.
-          if (location.key !== 'default') {
+          if (!isRootEntry(location)) {
             e.preventDefault();
             navigate(-1);
           }
@@ -73,7 +81,7 @@ function ItemDetail({ item }: { item: Item }) {
       <header className="detail__hero card">
         <div className="detail__heading">
           <span className="code">{item.code}</span>
-          <h1 className="detail__name">{item.name}</h1>
+          <PageHeading className="detail__name">{item.name}</PageHeading>
           <ConditionChip condition={item.condition} />
         </div>
         <div className="detail__loc">
@@ -197,6 +205,15 @@ function WhereDiagrams({ item, rack: rackId }: { item: Item; rack: string }) {
             highlightShelf={item.shelf}
             highlightBin={item.bin}
           />
+        )}
+        {rack.status === 'error' && (
+          <p className="inline-error">
+            <span aria-hidden="true">⚠ </span>
+            Couldn't load the other items on this rack, so only this item is shown.{' '}
+            <button type="button" className="link-button" onClick={rack.reload}>
+              Try again
+            </button>
+          </p>
         )}
         {!item.shelf && <p className="muted">The shelf isn't recorded for this item — look along the whole rack.</p>}
         <Link to={`/racks/${encodeURIComponent(rackId)}`} className="text-link">

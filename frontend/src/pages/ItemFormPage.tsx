@@ -1,13 +1,16 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { CONDITIONS, type Condition, type Item, type ItemInput } from '../api/types';
 import { ChevronLeftIcon } from '../components/Icons';
 import { LocationBadge } from '../components/LocationBadge';
-import { EmptyState, ErrorState, Loading, isNotFound } from '../components/StatusViews';
+import { PageHeading } from '../components/PageHeading';
+import { EmptyState, ErrorState, Loading, isNotFound, notFoundError } from '../components/StatusViews';
 import { useAsync } from '../hooks/useAsync';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { CONDITION_LABELS } from '../lib/conditions';
+import { showFlash } from '../lib/flash';
+import { isRootEntry, replaceState } from '../lib/history';
 import { describeLocation, parseLocation } from '../lib/location';
 
 export interface FormValues {
@@ -48,13 +51,54 @@ function fromItem(item: Item): FormValues {
   };
 }
 
+/** Mirrors the backend limits (backend/src/lib/itemSchema.js LIMITS). */
+export const LIMITS = {
+  code: 50,
+  name: 200,
+  category: 100,
+  location: 100,
+  unit: 30,
+  notes: 2000,
+  quantity: 1_000_000,
+} as const;
+
+const FIELD_LABELS: Record<FieldName, string> = {
+  code: 'Item code',
+  name: 'Name',
+  category: 'Category',
+  location: 'Location',
+  quantity: 'Quantity',
+  unit: 'Unit',
+  condition: 'Condition',
+  notes: 'Notes',
+};
+
+/** Form order, used to list errors in the summary in the order the fields appear. */
+const FIELD_ORDER: FieldName[] = ['code', 'name', 'location', 'category', 'condition', 'quantity', 'unit', 'notes'];
+
+const QUANTITY_RULE = `Quantity must be a whole number from 0 to ${LIMITS.quantity.toLocaleString('en')}.`;
+
+function tooLong(field: keyof typeof LIMITS): string {
+  return `${FIELD_LABELS[field as FieldName]} can be at most ${LIMITS[field].toLocaleString('en')} characters.`;
+}
+
 export function validate(values: FormValues): FieldErrors {
   const errors: FieldErrors = {};
-  if (!values.code.trim()) errors.code = 'Please enter an item code, e.g. TNT-004.';
-  if (!values.name.trim()) errors.name = 'Please enter a name, e.g. 4-man dome tent.';
+  const code = values.code.trim();
+  if (!code) errors.code = 'Please enter an item code, e.g. TNT-004.';
+  else if (code.length > LIMITS.code) errors.code = tooLong('code');
+  const name = values.name.trim();
+  if (!name) errors.name = 'Please enter a name, e.g. 4-man dome tent.';
+  else if (name.length > LIMITS.name) errors.name = tooLong('name');
+  if ((parseLocation(values.location).locationCode ?? '').length > LIMITS.location)
+    errors.location = tooLong('location');
+  if (values.category.trim().length > LIMITS.category) errors.category = tooLong('category');
   const q = values.quantity.trim();
   if (q === '') errors.quantity = 'Please enter a quantity (0 or more).';
   else if (!/^\d+$/.test(q)) errors.quantity = 'Quantity must be a whole number, 0 or more.';
+  else if (Number(q) > LIMITS.quantity) errors.quantity = QUANTITY_RULE;
+  if (values.unit.trim().length > LIMITS.unit) errors.unit = tooLong('unit');
+  if (values.notes.trim().length > LIMITS.notes) errors.notes = tooLong('notes');
   return errors;
 }
 
@@ -84,12 +128,27 @@ const KNOWN_FIELDS: Record<string, FieldName> = {
   notes: 'notes',
 };
 
+/** Raw validator wording ("Too big: expected string to have <=100 characters") that users shouldn't see. */
+const RAW_VALIDATOR_TEXT = /expected|received|invalid (input|option|type)|too (big|small)|[<>]=|^required$/i;
+
+/** Turn a backend validation message into friendly wording for that field. */
+export function friendlyServerMessage(field: FieldName, message: string): string {
+  if (!RAW_VALIDATOR_TEXT.test(message)) return message; // backend's own messages are already friendly
+  if (field === 'quantity') return QUANTITY_RULE;
+  if (field === 'condition') return 'Please choose a condition from the list.';
+  if (field in LIMITS && /too big|<=|at most|max/i.test(message)) return tooLong(field as keyof typeof LIMITS);
+  if ((field === 'code' || field === 'name') && /too small|>=|required/i.test(message)) {
+    return `Please enter ${field === 'code' ? 'an item code' : 'a name'}.`;
+  }
+  return `Please check the ${FIELD_LABELS[field].toLowerCase()}.`;
+}
+
 /** Best-effort mapping of server validation details (zod-style issues or {field: msg}) to fields. */
-function serverFieldErrors(details: unknown): FieldErrors {
+export function serverFieldErrors(details: unknown): FieldErrors {
   const out: FieldErrors = {};
   const put = (key: unknown, msg: unknown) => {
     const field = typeof key === 'string' ? KNOWN_FIELDS[key] : undefined;
-    if (field && typeof msg === 'string' && !out[field]) out[field] = msg;
+    if (field && typeof msg === 'string' && !out[field]) out[field] = friendlyServerMessage(field, msg);
   };
   if (Array.isArray(details)) {
     for (const issue of details) {
@@ -113,13 +172,18 @@ export function ItemFormPage() {
   const { id } = useParams();
   const editing = id !== undefined;
   useDocumentTitle(editing ? 'Edit item' : 'Add item');
-  const item = useAsync<Item | null>((signal) => (editing ? api.getItem(id, signal) : Promise.resolve(null)), [id]);
+  const item = useAsync<Item | null>(
+    (signal) =>
+      !editing ? Promise.resolve(null) : /^\d+$/.test(id) ? api.getItem(id, signal) : Promise.reject(notFoundError()),
+    [id],
+  );
 
   if (item.status === 'loading') return <Loading label="Loading item…" />;
   if (item.status === 'error') {
     if (isNotFound(item.error)) {
       return (
-        <EmptyState title="We couldn't find that item" icon="🧭">
+        <EmptyState title="We couldn't find that item" icon="🧭" pageHeading>
+          <p>It may have been deleted, or the link is wrong.</p>
           <Link to="/" className="btn btn--primary">
             Back to search
           </Link>
@@ -134,6 +198,7 @@ export function ItemFormPage() {
 
 function ItemForm({ item }: { item: Item | null }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [values, setValues] = useState<FormValues>(() => (item ? fromItem(item) : EMPTY));
   const [submitted, setSubmitted] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -179,18 +244,28 @@ function ItemForm({ item }: { item: Item | null }) {
     try {
       const input = toInput(values);
       const saved = item ? await api.updateItem(item.id, input) : await api.createItem(input);
-      navigate(`/items/${saved.id}`, {
-        replace: !item,
-        state: { flash: item ? 'Changes saved.' : `Added “${saved.name}”.` },
-      });
+      showFlash(item ? 'Changes saved.' : `Added “${saved.name}”.`);
+      if (item && !isRootEntry(location)) {
+        // The edit form is opened from the item's page: return to that history entry so Back
+        // from the item goes where the user came from (e.g. their search), not to this form.
+        navigate(-1);
+      } else {
+        // New item (or edit opened directly): replace the form so it never stays in history.
+        navigate(`/items/${saved.id}`, { replace: true, state: replaceState(location) });
+      }
     } catch (err) {
       setSaving(false);
       if (err instanceof ApiError && err.status === 409) {
         setServerErrors({ code: 'Another item already uses this code. Please choose a different one.' });
         setFormError('That item code is already taken.');
       } else if (err instanceof ApiError && err.status === 400) {
-        setServerErrors(serverFieldErrors(err.details));
-        setFormError(err.message || 'Please check the highlighted fields.');
+        const mapped = serverFieldErrors(err.details);
+        setServerErrors(mapped);
+        setFormError(
+          Object.keys(mapped).length > 0
+            ? 'Please fix the highlighted fields.'
+            : err.message || 'Please check the form.',
+        );
       } else {
         setFormError(err instanceof Error ? err.message : 'Could not save the item.');
       }
@@ -198,7 +273,21 @@ function ItemForm({ item }: { item: Item | null }) {
     }
   }
 
-  const errorList = Object.entries(errors) as [FieldName, string][];
+  const errorList = FIELD_ORDER.filter((f) => errors[f]).map((f) => [f, errors[f] as string] as const);
+
+  /** Back/Cancel on the edit form: return to the item's existing history entry instead of pushing a new one. */
+  const backToItem = (e: React.MouseEvent) => {
+    if (item && !isRootEntry(location)) {
+      e.preventDefault();
+      navigate(-1);
+    }
+  };
+
+  /** Summary links move focus to the field without adding a #hash history entry. */
+  const focusField = (e: React.MouseEvent, f: FieldName) => {
+    e.preventDefault();
+    document.getElementById(fid(f))?.focus();
+  };
   const describedBy = (f: FieldName, ...extra: string[]) =>
     [errors[f] ? `${fid(f)}-err` : '', ...extra].filter(Boolean).join(' ') || undefined;
 
@@ -212,10 +301,10 @@ function ItemForm({ item }: { item: Item | null }) {
 
   return (
     <div className="page page--form">
-      <Link to={item ? `/items/${item.id}` : '/'} className="back-link">
+      <Link to={item ? `/items/${item.id}` : '/'} className="back-link" onClick={backToItem}>
         <ChevronLeftIcon /> {item ? 'Back to item' : 'Back to search'}
       </Link>
-      <h1 className="page__title">{item ? `Edit ${item.code}` : 'Add an item'}</h1>
+      <PageHeading>{item ? `Edit ${item.code}` : 'Add an item'}</PageHeading>
 
       {(formError || errorList.length > 0) && (
         <div ref={summaryRef} tabIndex={-1} className="alert alert--error" role="alert">
@@ -224,7 +313,9 @@ function ItemForm({ item }: { item: Item | null }) {
             <ul>
               {errorList.map(([f, msg]) => (
                 <li key={f}>
-                  <a href={`#${fid(f)}`}>{msg}</a>
+                  <a href={`#${fid(f)}`} onClick={(e) => focusField(e, f)}>
+                    {msg}
+                  </a>
                 </li>
               ))}
             </ul>
@@ -276,12 +367,14 @@ function ItemForm({ item }: { item: Item | null }) {
               id={fid('location')}
               value={values.location}
               onChange={(e) => set('location', e.target.value)}
-              aria-describedby={`${fid('location')}-preview`}
+              aria-invalid={errors.location ? true : undefined}
+              aria-describedby={describedBy('location', `${fid('location')}-preview`)}
               placeholder="e.g. R03-B-2"
               autoCapitalize="characters"
               autoComplete="off"
               spellCheck={false}
             />
+            {fieldError('location')}
             <div
               id={`${fid('location')}-preview`}
               className="loc-preview"
@@ -322,7 +415,10 @@ function ItemForm({ item }: { item: Item | null }) {
               list={`${fid('category')}-list`}
               placeholder="e.g. Tents"
               autoComplete="off"
+              aria-invalid={errors.category ? true : undefined}
+              aria-describedby={describedBy('category')}
             />
+            {fieldError('category')}
             <datalist id={`${fid('category')}-list`}>
               {(categories.data ?? []).map((c) => (
                 <option key={c.name} value={c.name} />
@@ -336,6 +432,8 @@ function ItemForm({ item }: { item: Item | null }) {
               id={fid('condition')}
               value={values.condition}
               onChange={(e) => set('condition', e.target.value as Condition)}
+              aria-invalid={errors.condition ? true : undefined}
+              aria-describedby={describedBy('condition')}
             >
               {CONDITIONS.map((c) => (
                 <option key={c} value={c}>
@@ -343,6 +441,7 @@ function ItemForm({ item }: { item: Item | null }) {
                 </option>
               ))}
             </select>
+            {fieldError('condition')}
           </div>
 
           <div className="field field--qty">
@@ -369,6 +468,7 @@ function ItemForm({ item }: { item: Item | null }) {
               onChange={(e) => set('unit', e.target.value)}
               placeholder="pcs"
               autoComplete="off"
+              aria-invalid={errors.unit ? true : undefined}
               aria-describedby={describedBy('unit')}
             />
             {fieldError('unit')}
@@ -381,6 +481,7 @@ function ItemForm({ item }: { item: Item | null }) {
               rows={3}
               value={values.notes}
               onChange={(e) => set('notes', e.target.value)}
+              aria-invalid={errors.notes ? true : undefined}
               aria-describedby={describedBy('notes')}
             />
             {fieldError('notes')}
@@ -391,7 +492,7 @@ function ItemForm({ item }: { item: Item | null }) {
           <button type="submit" className="btn btn--primary btn--lg" disabled={saving}>
             {saving ? 'Saving…' : item ? 'Save changes' : 'Add item'}
           </button>
-          <Link to={item ? `/items/${item.id}` : '/'} className="btn btn--secondary btn--lg">
+          <Link to={item ? `/items/${item.id}` : '/'} className="btn btn--secondary btn--lg" onClick={backToItem}>
             Cancel
           </Link>
         </div>

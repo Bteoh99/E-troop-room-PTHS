@@ -1,5 +1,7 @@
-import { useEffect, useState, type ComponentType, type SVGProps } from 'react';
-import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type SVGProps } from 'react';
+import { Link, Outlet, useLocation } from 'react-router-dom';
+import { takeFlash } from '../lib/flash';
+import { focusIsFree, isRouteFocusPending, markRouteChange, setAnnouncer } from '../lib/routeFocus';
 import { MapIcon, PlusIcon, SearchIcon, TentIcon, UploadIcon } from './Icons';
 
 interface NavEntry {
@@ -10,29 +12,47 @@ interface NavEntry {
 }
 
 const NAV: NavEntry[] = [
-  { to: '/', label: 'Search', Icon: SearchIcon, isActive: (p) => p === '/' || /^\/items\/\d+$/.test(p) },
+  {
+    to: '/',
+    label: 'Search',
+    Icon: SearchIcon,
+    isActive: (p) => p === '/' || (/^\/items\/[^/]+(\/edit)?$/.test(p) && p !== '/items/new'),
+  },
   { to: '/map', label: 'Map', Icon: MapIcon, isActive: (p) => p.startsWith('/map') || p.startsWith('/racks') },
   { to: '/items/new', label: 'Add', Icon: PlusIcon, isActive: (p) => p === '/items/new' },
   { to: '/import', label: 'Import', Icon: UploadIcon, isActive: (p) => p.startsWith('/import') },
 ];
 
-export interface FlashState {
-  flash?: string;
-}
-
 export function Layout() {
   const location = useLocation();
-  const navigate = useNavigate();
   const [flash, setFlash] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState('');
+  const mainRef = useRef<HTMLElement>(null);
+  const lastPath = useRef(location.pathname);
 
-  // Pick up one-off messages passed via navigation state (e.g. "Item saved"),
-  // then clear them from history so they don't reappear on back/forward.
-  const incoming = (location.state as FlashState | null)?.flash;
+  // One-off messages ("Changes saved.") queued by pages via showFlash() before navigating.
   useEffect(() => {
-    if (!incoming) return;
-    setFlash(incoming);
-    navigate(location.pathname + location.search, { replace: true, state: null });
-  }, [incoming, location.pathname, location.search, navigate]);
+    const message = takeFlash();
+    if (message) setFlash(message);
+  }, [location.key]);
+
+  // Route-change focus: mark the change before pages' effects run (layout effect),
+  // so the new page's <PageHeading> can take focus when it mounts.
+  useLayoutEffect(() => {
+    if (lastPath.current === location.pathname) return;
+    lastPath.current = location.pathname;
+    markRouteChange();
+  }, [location.pathname]);
+
+  // Fallback while the page has no heading yet (e.g. still loading): park focus on <main>.
+  useEffect(() => {
+    if (isRouteFocusPending() && focusIsFree(mainRef.current)) mainRef.current?.focus({ preventScroll: true });
+  }, [location.pathname]);
+
+  useEffect(() => {
+    setAnnouncer(setAnnouncement);
+    return () => setAnnouncer(null);
+  }, []);
 
   useEffect(() => {
     if (!flash) return;
@@ -88,7 +108,11 @@ export function Layout() {
         )}
       </div>
 
-      <main id="main" className="main" tabIndex={-1}>
+      <p className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </p>
+
+      <main id="main" ref={mainRef} className="main" tabIndex={-1}>
         <Outlet />
       </main>
     </div>

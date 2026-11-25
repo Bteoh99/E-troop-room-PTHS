@@ -43,10 +43,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
-    throw new ApiError(
-      "Can't reach the store-room server. Check your connection and try again.",
-      0,
-    );
+    throw new ApiError("Can't reach the store-room server. Check your connection and try again.", 0);
   }
 
   if (res.status === 204) return undefined as T;

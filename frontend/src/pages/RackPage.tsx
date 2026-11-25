@@ -4,16 +4,21 @@ import { api } from '../api/client';
 import { ConditionChip } from '../components/ConditionChip';
 import { ChevronLeftIcon } from '../components/Icons';
 import { RackDiagram } from '../components/RackDiagram';
-import { EmptyState, ErrorState, Loading, isNotFound } from '../components/StatusViews';
+import { PageHeading } from '../components/PageHeading';
+import { EmptyState, ErrorState, Loading, isNotFound, notFoundError } from '../components/StatusViews';
 import { useAsync } from '../hooks/useAsync';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { normalizeRack } from '../lib/location';
 
 export function RackPage() {
   const { rack: rawRack = '' } = useParams();
-  const rack = normalizeRack(rawRack) ?? rawRack.toUpperCase();
-  useDocumentTitle(`Rack ${rack}`);
-  const detail = useAsync((signal) => api.getRack(rack, signal), [rack]);
+  const normalized = normalizeRack(rawRack);
+  const rack = normalized ?? rawRack;
+  useDocumentTitle(normalized ? `Rack ${normalized}` : 'Rack not found');
+  const detail = useAsync(
+    (signal) => (normalized ? api.getRack(normalized, signal) : Promise.reject(notFoundError())),
+    [normalized],
+  );
 
   const back = (
     <Link to="/map" className="back-link">
@@ -34,8 +39,16 @@ export function RackPage() {
       <div className="page">
         {back}
         {isNotFound(detail.error) ? (
-          <EmptyState title={`Rack ${rack} has no items`} icon="🗺️">
-            <p>There is nothing stored on this rack yet, or the rack doesn't exist.</p>
+          <EmptyState
+            title={normalized ? `Rack ${normalized} has no items` : `“${rack}” isn't a rack`}
+            icon="🗺️"
+            pageHeading
+          >
+            <p>
+              {normalized
+                ? "There is nothing stored on this rack yet, or the rack doesn't exist."
+                : 'Rack names look like R03. Pick a rack from the map instead.'}
+            </p>
             <Link to="/map" className="btn btn--primary">
               Back to the map
             </Link>
@@ -54,7 +67,7 @@ export function RackPage() {
   return (
     <div className="page page--rack">
       {back}
-      <h1 className="page__title">Rack {detail.data.rack}</h1>
+      <PageHeading>Rack {detail.data.rack}</PageHeading>
       <p className="page__lead">
         {allItems.length} item{allItems.length === 1 ? '' : 's'} · shelf A is the top
       </p>

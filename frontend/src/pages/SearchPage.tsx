@@ -1,8 +1,9 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { ItemCard } from '../components/ItemCard';
 import { SearchIcon } from '../components/Icons';
+import { PageHeading } from '../components/PageHeading';
 import { EmptyState, ErrorState, Loading } from '../components/StatusViews';
 import { useAsync } from '../hooks/useAsync';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
@@ -13,19 +14,39 @@ export const SEARCH_DEBOUNCE_MS = 200;
 export function SearchPage() {
   useDocumentTitle(null);
   const [params, setParams] = useSearchParams();
-  const [text, setText] = useState(() => params.get('q') ?? '');
+  const urlQuery = params.get('q') ?? '';
+  const [text, setText] = useState(urlQuery);
   const category = params.get('category') ?? '';
   const query = useDebouncedValue(text.trim(), SEARCH_DEBOUNCE_MS);
   const inputId = useId();
   const catId = useId();
+  /** The q value most recently written to / read from the URL. */
+  const syncedQuery = useRef(urlQuery);
 
-  // Keep the URL in sync (so Back from an item returns to the same search).
+  // URL -> box: the URL changed from outside (Search tab, logo, Back/Forward), e.g. "/" clears the search.
   useEffect(() => {
-    const next = new URLSearchParams(params);
-    if (query) next.set('q', query);
-    else next.delete('q');
-    if (next.toString() !== params.toString()) setParams(next, { replace: true });
-  }, [query, params, setParams]);
+    if (urlQuery === syncedQuery.current) return;
+    syncedQuery.current = urlQuery;
+    setText(urlQuery);
+  }, [urlQuery]);
+
+  // Box -> URL (debounced), so Back from an item returns to the same search.
+  // setParams changes identity on every URL change, so read it from a ref: this must run only when `query` changes.
+  const setParamsRef = useRef(setParams);
+  setParamsRef.current = setParams;
+  useEffect(() => {
+    if (query === syncedQuery.current) return;
+    syncedQuery.current = query;
+    setParamsRef.current(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (query) next.set('q', query);
+        else next.delete('q');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [query]);
 
   const results = useAsync(
     (signal) => api.listItems({ q: query || undefined, category: category || undefined }, signal),
@@ -46,7 +67,7 @@ export function SearchPage() {
 
   return (
     <div className="page page--search">
-      <h1 className="page__title">Find an item</h1>
+      <PageHeading>Find an item</PageHeading>
       <form className="search" role="search" onSubmit={(e) => e.preventDefault()}>
         <label htmlFor={inputId} className="visually-hidden">
           Search by item name, code or location
@@ -71,6 +92,13 @@ export function SearchPage() {
           <label htmlFor={catId}>Category</label>
           <select id={catId} value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">All categories</option>
+            {/* A category from the URL that the list doesn't (or doesn't yet) contain still shows as selected. */}
+            {category && !(categories.data ?? []).some((c) => c.name === category) && (
+              <option value={category}>
+                {category}
+                {categories.status === 'success' ? ' (0)' : ''}
+              </option>
+            )}
             {(categories.data ?? []).map((c) => (
               <option key={c.name} value={c.name}>
                 {c.name} ({c.count})

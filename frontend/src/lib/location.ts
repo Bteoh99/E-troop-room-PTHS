@@ -5,7 +5,9 @@
  *
  * Accepts loose input such as `R03-B-2`, `r3-b-2`, `R3 B 2`, `R3/B/2`, `3-B-2`,
  * `R03-B` (no bin) and `R03` (rack only) and normalises to `R03-B-2`.
- * Like the backend it also tolerates "R3B2", "Rack 3 Shelf B Bin 2" and "Rak 3 B 2".
+ * Like the backend (backend/src/lib/location.js — keep the two in sync) it also tolerates "R3B2",
+ * "R03–B–2" (en/em dashes), "Rack 3 Shelf B Bin 2" and "Rak 3 Tingkat B Petak 2". The text must
+ * start with a rack, so "Bin 5" or "Tingkat 2" are kept as text.
  * Input that cannot be parsed is kept as typed (trimmed) with rack/shelf/bin = null.
  */
 export interface ParsedLocation {
@@ -18,16 +20,20 @@ export interface ParsedLocation {
   parsed: boolean;
 }
 
-const SEP = String.raw`[\s\-/\\._:,|]*`;
-const PATTERN = new RegExp(String.raw`^R?${SEP}0*(\d{1,3})(?:${SEP}([A-Z])(?:${SEP}0*(\d{1,4}))?)?$`);
-const RACK_PATTERN = /^R?\s*-?\s*0*(\d{1,3})$/;
+const SEP = String.raw`[\s\-\/\\._:,|#]*`;
+const RACK_PART = String.raw`(?:(?:RACK|RAK|R)${SEP}(?:NO\.?${SEP})?)?0*(\d{1,3})`;
+const SHELF_WORD = String.raw`(?:SHELF|LEVEL|TINGKAT|PARA)`;
+const BIN_WORD = String.raw`(?:BIN|POSITION|POS|SLOT|PETAK|NO\.?)`;
+const PATTERN = new RegExp(
+  String.raw`^${RACK_PART}(?:${SEP}(?:${SHELF_WORD}${SEP})?([A-Z])(?:${SEP}(?:${BIN_WORD}${SEP})?0*(\d{1,4}))?)?$`,
+);
+const RACK_PATTERN = new RegExp(String.raw`^${RACK_PART}$`);
 
-/** Strip words people write around coordinates (English + Malay), e.g. "Rack 3 Shelf B Bin 2". */
-function stripWords(s: string): string {
-  return s
-    .replace(/\b(RACK|RAK|R\.)\s*/g, 'R')
-    .replace(/\b(SHELF|LEVEL|TINGKAT|PARA|BIN|POSITION|POS|SLOT|PETAK|NO\.?)\b/g, ' ')
-    .trim();
+/** Hyphen look-alikes that AutoCorrect / copy-paste produce: ‐ ‑ ‒ – — ― − ﹘ ﹣ － */
+const DASHES = /[‐-―−﹘﹣－]/g;
+
+function prepare(input: string): string {
+  return input.replace(DASHES, '-').replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
 export function formatRack(rackNumber: number | string): string {
@@ -40,7 +46,7 @@ export function parseLocation(input: string | null | undefined): ParsedLocation 
     return { locationCode: null, rack: null, shelf: null, bin: null, parsed: false };
   }
 
-  const match = PATTERN.exec(stripWords(raw.toUpperCase()));
+  const match = PATTERN.exec(prepare(raw));
   if (!match) {
     return { locationCode: raw, rack: null, shelf: null, bin: null, parsed: false };
   }
@@ -59,12 +65,16 @@ export function parseLocation(input: string | null | undefined): ParsedLocation 
 
 /** Normalise a rack identifier like "r3" / "3" / "R03" / "Rack 3" to "R03". Returns null if not a rack. */
 export function normalizeRack(input: string): string | null {
-  const m = RACK_PATTERN.exec(stripWords(input.trim().toUpperCase()));
+  const m = RACK_PATTERN.exec(prepare(input));
   return m ? formatRack(m[1] ?? '0') : null;
 }
 
 /** Human-friendly description, e.g. "Rack 03 · Shelf B · Bin 2". */
-export function describeLocation(loc: { rack: string | null; shelf: string | null; bin: number | null }): string | null {
+export function describeLocation(loc: {
+  rack: string | null;
+  shelf: string | null;
+  bin: number | null;
+}): string | null {
   if (!loc.rack) return null;
   const parts = [`Rack ${loc.rack.replace(/^R/, '')}`];
   if (loc.shelf) parts.push(`Shelf ${loc.shelf}`);

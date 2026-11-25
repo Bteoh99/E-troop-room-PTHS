@@ -16,7 +16,7 @@ export function LocationBadge({ locationCode, rack, shelf, bin, size = 'lg', sho
 
   if (!locationCode) {
     return (
-      <span className={`loc-badge loc-badge--${size} loc-badge--none`}>
+      <span className={`loc-badge loc-badge--${size} loc-badge--none`} data-testid="location-badge-none">
         <span className="visually-hidden">Location: </span>
         No location yet
       </span>
@@ -37,9 +37,7 @@ export function LocationBadge({ locationCode, rack, shelf, bin, size = 'lg', sho
         <span className="loc-badge__code">{locationCode}</span>
       </span>
       {showDescription && (
-        <span className="loc-badge__desc">
-          {description ?? 'Not a rack coordinate, so it is not shown on the map'}
-        </span>
+        <span className="loc-badge__desc">{description ?? 'Not a rack coordinate, so it is not shown on the map'}</span>
       )}
     </span>
   );

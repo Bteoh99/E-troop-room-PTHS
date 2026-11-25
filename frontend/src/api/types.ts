@@ -80,7 +80,8 @@ export interface ImportRowError {
 export type ImportPreviewRow = Partial<Omit<Item, 'id'>> & {
   id?: number | null;
   row?: number;
-  action?: 'create' | 'update';
+  /** "unchanged" = existing item the file leaves as is. Unknown future values are shown as-is. */
+  action?: 'create' | 'update' | 'unchanged' | (string & {});
 } & Record<string, unknown>;
 
 export interface ImportResult {
@@ -91,9 +92,11 @@ export interface ImportResult {
   /** Entries whose message starts with "Warning:" are warnings; the row was still imported. */
   errors: ImportRowError[];
   preview: ImportPreviewRow[];
-  /** Backend additions (optional). */
+  /** Backend additions (optional). Existing items the file leaves as is (counted per distinct code). */
+  unchanged?: number;
   headerRow?: number;
   columns?: Record<string, number>;
+  /** Unrecognised or duplicate headers, possibly with a reason, e.g. `ID (duplicate code column; "Code" is used)`. */
   ignoredColumns?: string[];
 }
 

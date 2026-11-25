@@ -6,7 +6,7 @@ export function NotFoundPage() {
   useDocumentTitle('Page not found');
   return (
     <div className="page">
-      <EmptyState title="This page doesn't exist" icon="🧭">
+      <EmptyState title="This page doesn't exist" icon="🧭" pageHeading>
         <p>Looks like this trail is a dead end.</p>
         <Link to="/" className="btn btn--primary">
           Go to search

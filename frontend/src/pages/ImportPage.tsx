@@ -2,6 +2,7 @@ import { useId, useRef, useState, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import type { ImportPreviewRow, ImportResult, ImportRowError } from '../api/types';
+import { PageHeading } from '../components/PageHeading';
 import { Loading } from '../components/StatusViews';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { conditionLabel } from '../lib/conditions';
@@ -41,6 +42,9 @@ function stringList(value: unknown): string[] {
 /** Turn an import API error into friendly wording for non-technical users. */
 export function describeImportError(err: Error): { message: string; hints: string[] } {
   if (err instanceof ApiError) {
+    if (err.status === 429) {
+      return { message: 'Another import is running — please try again in a moment.', hints: [] };
+    }
     if (err.status === 413) {
       return { message: 'That file is bigger than 5 MB. Please split it or remove unused sheets.', hints: [] };
     }
@@ -58,6 +62,39 @@ export function describeImportError(err: Error): { message: string; hints: strin
     }
   }
   return { message: err.message, hints: [] };
+}
+
+/** The chosen file could no longer be read (changed, moved or deleted after it was picked). */
+export class FileReadError extends Error {
+  constructor() {
+    super(
+      "We couldn't read that file. It may have been changed, moved or renamed after you picked it. Please choose it again.",
+    );
+    this.name = 'FileReadError';
+  }
+}
+
+/** Resolves false when the browser can no longer read the picked file. */
+export function canReadFile(file: Blob): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => resolve(true);
+      reader.onerror = () => resolve(false);
+      reader.readAsArrayBuffer(file.slice(0, 1));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * A failed upload of a file that changed on disk looks like a network error (status 0).
+ * Tell those apart so the user gets the right advice.
+ */
+async function explainUploadError(err: unknown, file: File): Promise<Error> {
+  if (err instanceof ApiError && err.status === 0 && !(await canReadFile(file))) return new FileReadError();
+  return toError(err);
 }
 
 function formatSize(bytes: number): string {
@@ -79,7 +116,7 @@ export function ImportPage() {
       const result = await api.importFile(file, true);
       setStep({ kind: 'preview', file, result });
     } catch (err) {
-      setStep({ kind: 'error', file, error: toError(err), during: 'check' });
+      setStep({ kind: 'error', file, error: await explainUploadError(err, file), during: 'check' });
     }
   }
 
@@ -89,17 +126,18 @@ export function ImportPage() {
       const result = await api.importFile(file, false);
       setStep({ kind: 'done', result });
     } catch (err) {
-      setStep({ kind: 'error', file, error: toError(err), during: 'import', result: preview });
+      setStep({ kind: 'error', file, error: await explainUploadError(err, file), during: 'import', result: preview });
     }
   }
 
   function onFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    // Always clear the input, so picking the same (e.g. just-edited) file again fires "change" again.
+    e.target.value = '';
     if (!file) return;
     const problem = checkFile(file);
     if (problem) {
       setStep({ kind: 'choose', problem });
-      e.target.value = '';
       return;
     }
     void runCheck(file);
@@ -115,7 +153,7 @@ export function ImportPage() {
 
   return (
     <div className="page page--import">
-      <h1 className="page__title">Import from Excel</h1>
+      <PageHeading>Import from Excel</PageHeading>
       <p className="page__lead">
         Bring in the inventory spreadsheet. We'll check it first and show you what will change — nothing is saved until
         you press <strong>Confirm import</strong>. Items with the same code are updated, new codes are added.
@@ -181,6 +219,9 @@ export function ImportPage() {
             File: <strong>{step.file.name}</strong> ({formatSize(step.file.size)})
           </p>
           <Counts result={step.result} future />
+          <p className="field__hint">
+            Items are matched by code. Blank cells keep the existing value — to clear a field, edit the item instead.
+          </p>
           <IgnoredColumns result={step.result} />
           <ProblemsTables result={step.result} future />
           <PreviewTable rows={step.result.preview} />
@@ -199,18 +240,22 @@ export function ImportPage() {
           </div>
           {step.result.created + step.result.updated === 0 && (
             <p className="field__warn">
-              <span aria-hidden="true">⚠ </span>There is nothing to import in this file. Check the column headings match
-              the template.
+              <span aria-hidden="true">⚠ </span>There is nothing to import in this file.{' '}
+              {(step.result.unchanged ?? 0) > 0
+                ? 'Every item in it already matches the store-room list.'
+                : 'Check the column headings match the template.'}
             </p>
           )}
         </section>
       )}
 
       {step.kind === 'done' && (
-        <section className="card card--success" aria-labelledby="done-heading" role="status">
-          <h2 id="done-heading" className="card__title">
-            <span aria-hidden="true">✅ </span>Import finished
-          </h2>
+        <section className="card card--success" aria-labelledby="done-heading">
+          <div role="status">
+            <h2 id="done-heading" className="card__title">
+              <span aria-hidden="true">✅ </span>Import finished
+            </h2>
+          </div>
           <Counts result={step.result} />
           <ProblemsTables result={step.result} />
           <div className="btn-row">
@@ -266,7 +311,10 @@ function ImportErrorBox({
   onReset: () => void;
 }) {
   const { message, hints } = describeImportError(step.error);
-  const fixable = step.error instanceof ApiError && (step.error.status === 400 || step.error.status === 413);
+  // Retrying can't help when the file itself is the problem: offer "choose a different file" instead.
+  const fixable =
+    step.error instanceof FileReadError ||
+    (step.error instanceof ApiError && (step.error.status === 400 || step.error.status === 413));
   return (
     <div className="status status--error" role="alert">
       <p className="status__title">
@@ -300,6 +348,9 @@ function Counts({ result, future = false }: { result: ImportResult; future?: boo
   const stats = [
     { label: future ? 'Will be added' : 'Added', value: result.created, cls: 'stat--created' },
     { label: future ? 'Will be updated' : 'Updated', value: result.updated, cls: 'stat--updated' },
+    ...(result.unchanged !== undefined
+      ? [{ label: future ? 'Already up to date' : 'Unchanged', value: result.unchanged, cls: 'stat--unchanged' }]
+      : []),
     { label: future ? 'Will be skipped' : 'Skipped', value: result.skipped, cls: 'stat--skipped' },
     { label: 'Problems', value: problems.length, cls: 'stat--errors' },
     { label: 'Warnings', value: warnings.length, cls: 'stat--warnings' },
@@ -320,10 +371,17 @@ function IgnoredColumns({ result }: { result: ImportResult }) {
   const ignored = result.ignoredColumns ?? [];
   if (ignored.length === 0) return null;
   return (
-    <p className="note">
+    <div className="note">
       <span aria-hidden="true">ℹ️ </span>
-      These columns were not recognised and will be ignored: <strong>{ignored.join(', ')}</strong>.
-    </p>
+      These columns will be ignored:
+      <ul className="note__list">
+        {ignored.map((c) => (
+          <li key={c}>
+            <strong>{String(c)}</strong>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -401,6 +459,12 @@ function cell(value: unknown): string {
   return String(value);
 }
 
+const ACTION_LABELS: Record<string, string> = { create: 'Add new', update: 'Update', unchanged: 'No change' };
+
+function actionLabel(action: unknown): string {
+  return typeof action === 'string' ? (ACTION_LABELS[action] ?? action) : '—';
+}
+
 function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
   if (rows.length === 0) return null;
   return (
@@ -408,6 +472,7 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
       <table className="table table--wide" data-testid="import-preview">
         <caption>
           First {rows.length} row{rows.length === 1 ? '' : 's'} as they will be saved
+          <span className="table__scroll-hint"> — swipe sideways to see every column</span>
         </caption>
         <thead>
           <tr>
@@ -425,7 +490,7 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
           {rows.map((r, i) => (
             <tr key={`${String(r.row ?? '')}-${String(r.code)}-${i}`}>
               <td>{cell(r.row)}</td>
-              <td>{r.action === 'update' ? 'Update' : r.action === 'create' ? 'Add new' : '—'}</td>
+              <td>{actionLabel(r.action)}</td>
               <td className="code">{cell(r.code)}</td>
               <td>{cell(r.name)}</td>
               <td>

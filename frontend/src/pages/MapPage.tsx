@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
+import { PageHeading } from '../components/PageHeading';
 import { EmptyState, ErrorState, Loading } from '../components/StatusViews';
 import { StoreMap } from '../components/StoreMap';
 import { useAsync } from '../hooks/useAsync';
@@ -11,7 +12,7 @@ export function MapPage() {
 
   return (
     <div className="page page--map">
-      <h1 className="page__title">Store-room map</h1>
+      <PageHeading>Store-room map</PageHeading>
       <p className="page__lead">Tap a rack to see what is on each shelf.</p>
 
       {racks.status === 'loading' && <Loading label="Loading map…" />}
@@ -22,6 +23,11 @@ export function MapPage() {
         (racks.data.racks.length === 0 ? (
           <EmptyState title="No racks yet" icon="🗺️">
             <p>Racks appear here once items have a location like R03-B-2.</p>
+            {racks.data.unlocated > 0 && (
+              <p>
+                {racks.data.unlocated} item{racks.data.unlocated === 1 ? ' has' : 's have'} no rack location yet.
+              </p>
+            )}
             <Link to="/items/new" className="btn btn--primary">
               Add an item
             </Link>

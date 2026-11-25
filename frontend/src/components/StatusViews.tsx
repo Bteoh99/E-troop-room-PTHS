@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { ApiError } from '../api/client';
+import { PageHeading } from './PageHeading';
 
 export function Loading({ label = 'Loading…' }: { label?: string }) {
   return (
@@ -32,18 +33,42 @@ export function ErrorState({
   );
 }
 
-export function EmptyState({ title, children, icon = '🏕️' }: { title: string; children?: ReactNode; icon?: string }) {
+export function EmptyState({
+  title,
+  children,
+  icon = '🏕️',
+  pageHeading = false,
+}: {
+  title: string;
+  children?: ReactNode;
+  icon?: string;
+  /** Render the title as the page's <h1> (for whole-page states such as "not found"). */
+  pageHeading?: boolean;
+}) {
   return (
     <div className="status status--empty">
       <span className="status__icon" aria-hidden="true">
         {icon}
       </span>
-      <p className="status__title">{title}</p>
+      {pageHeading ? (
+        <PageHeading className="status__title">{title}</PageHeading>
+      ) : (
+        <p className="status__title">{title}</p>
+      )}
       {children}
     </div>
   );
 }
 
+/**
+ * True for "this thing doesn't exist" answers when loading a page's main record:
+ * 404, or 400 (the backend's answer for an id/rack that isn't valid at all, e.g. /items/abc).
+ */
 export function isNotFound(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404;
+  return error instanceof ApiError && (error.status === 404 || error.status === 400);
+}
+
+/** Rejects like the API would for a URL parameter that can never exist (saves a pointless request). */
+export function notFoundError(message = 'Not found'): ApiError {
+  return new ApiError(message, 404);
 }

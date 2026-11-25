@@ -252,7 +252,8 @@ describe('Add item form', () => {
     await user.type(field(/^name/i), 'n');
     await user.click(screen.getByRole('button', { name: 'Add item' }));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Validation failed');
+    // Lead decision (round 2): a generic "Validation failed" is replaced by friendly wording.
+    expect(alert).toHaveTextContent('Please fix the highlighted fields.');
     expect(field(/^name/i)).toHaveAccessibleDescription(/Name must be at most 200 characters/);
     expect(field('Quantity')).toHaveAccessibleDescription(/Quantity is too large/);
   });
@@ -272,8 +273,11 @@ describe('Add item form', () => {
     const alert = await screen.findByRole('alert');
     expect(within(alert).getAllByRole('link')).toHaveLength(2);
     expect(field('Category')).toHaveAttribute('aria-invalid', 'true');
-    expect(field('Category')).toHaveAccessibleDescription(/Too big/);
+    // Lead decision (round 2): raw zod text ("Too big: …") is translated into friendly wording.
+    expect(field('Category')).toHaveAccessibleDescription(/Category can be at most 100 characters/);
     expect(field('Location')).toHaveAttribute('aria-invalid', 'true');
+    expect(field('Location')).toHaveAccessibleDescription(/Location can be at most 100 characters/);
+    expect(alert).not.toHaveTextContent(/Too big|expected string/);
   });
 
   it('shows a network error message without losing the typed values', async () => {
