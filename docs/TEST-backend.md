@@ -116,3 +116,115 @@ This matters little for Malay or English names, but it is a gap against the spec
 2. **A location over 100 characters is rejected.** On the API it gives a 400. On import, the whole row is skipped ("locationCode: Too big…; row skipped"). The spec says never to reject an item for an odd location. Long free-text locations ("Under the stairs, in the big blue box next to…") are plausible in the real file, so consider truncating with a warning, or raising the limit.
 3. A header that matches an alias but loses to a higher-priority alias (for example `Description` next to `Name`, or `Remarks` next to `Notes`) is silently dropped. It is not listed in `ignoredColumns`, so the user isn't told that column was skipped.
 4. A coordinate-like `q` such as `R03-A-1` also returns `R03-A-10` and `R03-A-11`, because it is a plain substring match on the location text, and the exact location does not rank higher. This is within the spec. A future improvement could rank an exact location match first.
+
+---
+
+## Round 2
+
+Run: `cd backend && npm test`. I tested `b27ebb9` first, then retested the working tree once the developer's follow-up fixes landed; those fixes are now committed as `462d2b1`. As in Round 1, every test uses in-memory or `os.tmpdir()` databases, and the process tests delete their temp folders. The `data/store.db` sha256 is the same before and after, and I did not start a real server. I changed no app source and made no commits.
+
+### Result
+
+**484 tests: 484 passed, 0 failed** against `462d2b1`.
+
+| File | Tests | Pass |
+|---|---:|---:|
+| smoke.test.js | 3 | 3 |
+| location.test.js | 83 | 83 |
+| lib.test.js | 102 | 102 |
+| items.api.test.js | 51 | 51 |
+| search.api.test.js | 39 | 39 |
+| categories-racks.api.test.js | 19 | 19 |
+| import.api.test.js | 62 | 62 |
+| round2.test.js (developer) | 52 | 52 |
+| **round2-tester.test.js (new, mine)** | 73 | 73 |
+| **Total** | **484** | **484** |
+
+The 10 Round 1 failures (Bug 1, shelf/bin words read as a rack; Bug 2, case folding for non-ASCII letters) now pass and were not edited. `tests/zip.js` is a new helper: a small zip reader and writer for building hostile `.xlsx` files.
+
+### Were the developer's 3 test adjustments legitimate? Yes, all 3.
+
+| Test | Change | Verdict |
+|---|---|---|
+| `helpers.js` `IMPORT_KEYS` | added `unchanged` | Legitimate: this is the new response field the lead decided on. |
+| import.api "re-importing the same file is idempotent" | first run `updated:1` → `unchanged:1`; second run `updated:2` → `unchanged:2` | Legitimate. The existing item already has name "Old tent", so the row changes nothing. The test still checks idempotence (2 items, nothing created on the second run). |
+| search.api coordinate `r03-a-1` | `['ROP-010','ROP-011']` → `['ROP-010']` | Legitimate. The lead decided coordinate search is exact (R03-A-1 does not match R03-A-10). |
+
+The test bodies weren't weakened in any other way: assertions were changed only where a decision changed the expected values.
+
+### New coverage (`tests/round2-tester.test.js`)
+
+- **Regression for my Round 1 observations and review findings not already in round2.test.js**
+  - Whitespace-only and non-breaking-space-only cells count as blank, so an existing item is reported `unchanged`.
+  - A blank Condition never resets `damaged`, in both dry and real runs.
+  - An over-long location built from Rack/Shelf/Bin columns gives a warning, and the row is still imported. Through the API, an over-long location is still a 400.
+  - English `Description` next to `Name` becomes notes.
+  - `ID` next to `Code` is listed as a duplicate column, and its values are not used as codes.
+- **Duplicate codes and `unchanged`**
+  - An existing item edited on two rows that end where it started is counted `unchanged` and is not written: `updatedAt` stays the same.
+  - A dry run and a real run give the same response (apart from ids) for a mix of create, update, unchanged, duplicate and skipped rows.
+- **Mixed queries**
+  - `tent r1`, `r1 tent`, `tent R01-A-1`, `tent 1-a`, `tent r1 b`, `tent r01–b–2` (en dash) and `stove r4` all return the right items. `r1 r3` and `tent r9` return nothing.
+  - `r3` matches only R03, not R30. `r1` also matches a code containing `r1`.
+  - An exact location ranks above a notes match whose name sorts earlier.
+  - With more than 8 words, every word must still match. Repeated words and extra spaces make no difference.
+- **Unicode**
+  - Search finds emoji, CJK and Tamil text, matches `KHEMAH` case-insensitively, and matches `CAFÉ` and `café`.
+  - Codes like `ö-1` are uppercased and duplicates are detected regardless of case, on POST (409) and on import (update).
+  - Tamil text survives an xlsx round trip.
+  - `/api/categories` groups `Ölzeug` and `ölzeug` together, consistent with the category filter.
+- **xlsx guard**
+  - A 200 MB sheet compressed to about 200 KB is rejected with 400 in under 3 s.
+  - An entry that declares 10 bytes but inflates to 100 MB gives 400.
+  - More than 2000 entries gives 400.
+  - Stored (uncompressed) entries import normally.
+  - An OLE container (password-protected Excel) gives 400, and so does a zip that is not a workbook.
+  - **Fuzzing:** 300 randomly corrupted workbooks plus every 97-byte truncation only ever give 200 or 400, never 500.
+  - Sheet entries renamed to `/xl/worksheets/sheet1.xml` or `xl/worksheets/sheet1.xml.bak` are still counted. One test also confirms that ExcelJS really does import a sheet whose name starts with `/`.
+- **CSV limits**
+  - 19,000 rows × 13 mostly-empty columns are accepted.
+  - Exactly 20,000 data rows are accepted.
+  - A file with 1,000,000 lines gets 400 within 5 s.
+- **Malformed multipart** – 400 for each of these:
+  - garbage with a boundary
+  - a part without headers
+  - a 100 KB part header
+  - an empty boundary
+  - `multipart/mixed`
+  - `file` sent as a text field
+  - two files
+  - more than 10 fields
+
+  Odd but valid filenames (`../../etc/items.csv`, `stör ☃.csv`, a Windows path) are accepted.
+- **JSON bodies**
+  - UTF-16 and gzip-encoded JSON are accepted.
+  - Corrupt gzip gives 400 and an unknown `Content-Encoding` gives 400. A gzip bomb (50 MB inflated) gives 413.
+  - `null`, `"abc"`, `42` and 5000-deep arrays give 400.
+  - `__proto__` and `constructor` keys pollute nothing.
+- **Item ids:** `00001` and `%31` return 200. `999999999999999` returns 404. `9999999999999999`, `1abc`, `1%20` and `-0` return 400.
+- **Process level**
+  - A child process that imports `src/app.js` and calls `createApp` does not create the `DB_PATH` file (n4).
+  - 4 processes opening the same fresh DB file at once all succeed, and `schema_version` has exactly one row (n3).
+- **Import concurrency:** 8 simultaneous uploads each get 200 or 429 (the observed run gave 3 × 200 and 5 × 429), never 500, and the next import works.
+
+### Bugs found in Round 2, all fixed in `462d2b1` before this report
+
+Against `b27ebb9` these tests failed. All of them pass against `462d2b1`.
+
+| # | Severity | Bug (at `b27ebb9`) | Test | Fixed by |
+|---|---|---|---|---|
+| R2-T1 | Medium | **The xlsx guard could be bypassed by renaming entries.** It counted rows only in `^xl/worksheets/[^/]+\.xml$`. ExcelJS strips a leading `/` and matches sheets with an unanchored regex. **Measured:** a 3 MB workbook (310k rows) with the sheet named `/xl/worksheets/sheet1.xml` passed the guard as `rows: 0` and ExcelJS loaded it all: 3.3 s and 684 MB RSS, against 0.3 s / 252 MB with the normal name. The reviewer found the same thing independently (R2-1). | "rows in a sheet entry named …" | The guard now counts tags in every entry, normalises names, and allows any tag spelling. Imports are also serialised, with 429 beyond the queue. |
+| R2-T2 | Low | An existing item changed on one row and changed back on a later row was reported `unchanged`, but it was written twice and `updatedAt` changed. | "edited on two rows that end where it started" | The import now works out the final state in memory, then does one write per code. |
+| R2-T3 | Low | Only the first 8 search words were used, so `…8 matching words… zzz` still returned the item. | "every word must match, even with more than 8 words" | The token cap was removed. |
+| R2-T4 | Low | `/api/categories` grouped case-insensitively only for ASCII letters (`Ölzeug` and `ölzeug` were listed separately), while the filter matched both. | "categories are grouped case-insensitively for non-ASCII letters too" | Grouping now folds case in JS. |
+| R2-T5 | Nit | The CSV import applied the 240,000-cell cap, so 19,000 rows × 13 columns were rejected although under the 20,000-row limit. This is the reviewer's R2-2. | "a CSV under the 20,000-row limit is not rejected…" | The CSV cell cap was dropped; SPEC.md now says "CSV has no cell cap". |
+
+**Remaining app bugs: none found.**
+
+### Observations (not bugs under the current spec)
+
+1. Search does not apply Unicode normalisation. NFC `café` and NFD `cafe` + U+0301 don't find each other. This only matters for text pasted from macOS or PDFs.
+2. `tent rack 1` / `rack 1 tent` return nothing, because `rack` and `1` are separate words. Only a single coordinate word like `r1` works inside a mixed query, which is what the spec says.
+3. Invalid UTF-8 in a JSON body is stored as U+FFFD replacement characters, with no error.
+4. Full case folding is not done: `STRASSE` does not find `Straße`, and Turkish dotted `İ` behaves as JavaScript's `toLowerCase` dictates.
+5. Review n6 (numeric shelves in separate columns) is still deferred, as agreed.
