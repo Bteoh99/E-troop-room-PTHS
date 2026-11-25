@@ -8,9 +8,11 @@ import { parseCsv, decodeText } from '../lib/csv.js';
 import { buildImportPlan } from '../lib/importRows.js';
 import { findHeaderRow } from '../lib/headers.js';
 import { badRequest } from '../lib/errors.js';
+import { checkXlsx, XLSX_LIMITS } from '../lib/xlsxGuard.js';
+import { updateItemSchema } from '../lib/itemSchema.js';
 import { buildNewItem, createItem, getItemByCode, mergeItem, updateItem } from './items.js';
 
-export const MAX_IMPORT_ROWS = 20_000;
+export const MAX_IMPORT_ROWS = 20_000; // data rows (after the header)
 export const PREVIEW_ROWS = 20;
 
 /** ExcelJS cell value -> primitive (rich text, formulas, hyperlinks, errors flattened). */
@@ -33,14 +35,29 @@ function sheetRows(ws) {
   return rows;
 }
 
+const tooManyRows = () =>
+  badRequest(`Too many rows; the maximum is ${MAX_IMPORT_ROWS} per import. Split the file into smaller files.`);
+
 /** Read rows from an .xlsx or .csv buffer. Picks the first (visible) sheet that has a usable header row. */
 export async function readSpreadsheet(buffer, ext) {
   if (ext === '.csv') {
-    return parseCsv(decodeText(buffer)).map((cells, i) => ({ rowNumber: i + 1, cells }));
+    try {
+      // +200 leaves room for title/blank rows above the header; the exact check is in importItems.
+      return parseCsv(decodeText(buffer), undefined, { maxRows: MAX_IMPORT_ROWS + 200, maxCells: XLSX_LIMITS.maxCells })
+        .map((cells, i) => ({ rowNumber: i + 1, cells }));
+    } catch (err) {
+      if (err instanceof RangeError) {
+        throw err.message === 'CSV_TOO_MANY_ROWS'
+          ? tooManyRows()
+          : badRequest('The CSV file has too many cells to import. Delete unused columns.');
+      }
+      throw err;
+    }
   }
   if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
     throw badRequest('This file is not a valid .xlsx workbook. In Excel use "Save As" > "Excel Workbook (.xlsx)" or "CSV".');
   }
+  checkXlsx(buffer); // bounded-memory size/row check before ExcelJS loads everything
   const wb = new ExcelJS.Workbook();
   try {
     await wb.xlsx.load(buffer);
@@ -79,67 +96,83 @@ function previewItem(item, row, action) {
   };
 }
 
+const COMPARED = ['code', 'name', 'category', 'locationCode', 'quantity', 'unit', 'condition', 'notes'];
+const sameItem = (a, b) => COMPARED.every((k) => a[k] === b[k]);
+
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {Buffer} buffer
  * @param {{ ext: '.xlsx'|'.csv', dryRun: boolean }} opts
+ *
+ * Counts are per distinct code: created (new code), updated (existing item that changes),
+ * unchanged (existing item the file leaves as it is). A code that appears on several rows is one
+ * item: later rows are applied on top of earlier ones (warning), and its single preview entry
+ * shows the final result.
  */
 export async function importItems(db, buffer, { ext, dryRun }) {
   const rows = await readSpreadsheet(buffer, ext);
   if (rows.length === 0) throw badRequest('The file is empty.');
-  if (rows.length > MAX_IMPORT_ROWS + 1) {
-    throw badRequest(`Too many rows (${rows.length}); the maximum is ${MAX_IMPORT_ROWS} per import.`);
-  }
   const plan = buildImportPlan(rows);
+  if (plan.records.length + plan.skipped > MAX_IMPORT_ROWS) throw tooManyRows();
+
+  const errors = [...plan.errors];
+  let skipped = plan.skipped;
+
+  const run = () => {
+    const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (current) }
+    for (const { row, data } of plan.records) {
+      const code = data.code.toUpperCase();
+      let entry = byCode.get(code);
+      const original = entry ? entry.original : getItemByCode(db, code);
+      const current = entry ? entry.item : original;
+      let item;
+      try {
+        if (!current) item = dryRun ? buildNewItem(data) : createItem(db, data);
+        else {
+          const merged = mergeItem(current, updateItemSchema.parse(data));
+          // Skip the write (and the updatedAt bump) when nothing changes.
+          item = dryRun || sameItem(merged, current) ? merged : updateItem(db, current.id, data);
+        }
+      } catch (err) {
+        if (!(err instanceof ZodError)) throw err;
+        const msg = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+        errors.push({ row, message: `${msg}; row skipped` });
+        skipped++;
+        continue;
+      }
+      if (entry) {
+        errors.push({ row, message: `Warning: code ${code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
+        entry.item = item;
+        entry.lastRow = row;
+      } else {
+        entry = { firstRow: row, lastRow: row, original, item };
+        byCode.set(code, entry);
+      }
+    }
+    return byCode;
+  };
+
+  const byCode = dryRun ? run() : db.transaction(run)();
 
   const result = {
     dryRun,
     created: 0,
     updated: 0,
-    skipped: plan.skipped,
-    errors: [...plan.errors],
+    unchanged: 0,
+    skipped,
+    errors: errors.sort((a, b) => a.row - b.row),
     preview: [],
     headerRow: plan.headerRow,
     columns: plan.mapping,
-    ignoredColumns: plan.unmappedHeaders,
+    ignoredColumns: plan.ignoredColumns,
   };
-
-  const run = () => {
-    const seen = new Map(); // code -> { item, row } already handled in this file
-    for (const { row, data } of plan.records) {
-      const code = data.code.toUpperCase();
-      const prior = seen.get(code);
-      const base = prior?.item ?? getItemByCode(db, code);
-      let item;
-      let action;
-      try {
-        if (base) {
-          action = 'update';
-          item = dryRun ? mergeItem(base, data) : updateItem(db, base.id, data);
-        } else {
-          action = 'create';
-          item = dryRun ? buildNewItem(data) : createItem(db, data);
-        }
-      } catch (err) {
-        if (!(err instanceof ZodError)) throw err;
-        const msg = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
-        result.errors.push({ row, message: `${msg}; row skipped` });
-        result.skipped++;
-        continue;
-      }
-      if (prior) {
-        result.errors.push({ row, message: `Warning: code ${code} also appears on row ${prior.row}; this row overwrites it` });
-      }
-      seen.set(code, { item, row });
-      result[action === 'create' ? 'created' : 'updated']++;
-      if (result.preview.length < PREVIEW_ROWS) result.preview.push(previewItem(item, row, action));
+  for (const { firstRow, original, item } of byCode.values()) {
+    const action = !original ? 'create' : sameItem(original, item) ? 'unchanged' : 'update';
+    result[action === 'create' ? 'created' : action === 'update' ? 'updated' : 'unchanged']++;
+    if (result.preview.length < PREVIEW_ROWS) {
+      result.preview.push(previewItem({ ...item, id: item.id ?? original?.id ?? null }, firstRow, action));
     }
-  };
-
-  if (dryRun) run();
-  else db.transaction(run)();
-
-  result.errors.sort((a, b) => a.row - b.row);
+  }
   return result;
 }
 

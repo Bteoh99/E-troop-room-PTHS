@@ -2,23 +2,28 @@
  * Location coordinate parser (pure, no I/O).
  *
  * Canonical form: "R03-B-2" = Rack 03, Shelf B (A = top), Bin 2.
- * Accepts loose input such as "R03-B-2", "r3-b-2", "R3 B 2", "R3/B/2", "3-B-2",
- * "R03-B", "R03", "R3B2", "Rack 3 Shelf B Bin 2", "Rak 3 B 2".
- * Unparseable input is kept as-is (trimmed) with rack/shelf/bin = null.
+ * Accepts loose input such as "R03-B-2", "r3-b-2", "R3 B 2", "R3/B/2", "3-B-2", "R03-B", "R03",
+ * "R3B2", "R03–B–2" (en/em dashes), "Rack 3 Shelf B Bin 2", "Rak 3 Tingkat B Petak 2".
+ *
+ * The text must START with a rack (a number, optionally after R / Rack / Rak). Shelf and bin
+ * keywords are only understood after the rack, so "Bin 5", "Shelf 3" or "Tingkat 2" are NOT
+ * coordinates. Unparseable input is kept as-is (trimmed) with rack/shelf/bin = null.
  */
 
-const SEP = String.raw`[\s\-\/\\._:,|]*`;
+const SEP = String.raw`[\s\-\/\\._:,|#]*`;
+const RACK_PART = String.raw`(?:(?:RACK|RAK|R)${SEP}(?:NO\.?${SEP})?)?0*(\d{1,3})`;
+const SHELF_WORD = String.raw`(?:SHELF|LEVEL|TINGKAT|PARA)`;
+const BIN_WORD = String.raw`(?:BIN|POSITION|POS|SLOT|PETAK|NO\.?)`;
 const LOCATION_RE = new RegExp(
-  String.raw`^R?${SEP}0*(\d{1,3})(?:${SEP}([A-Z])(?:${SEP}0*(\d{1,4}))?)?$`
+  String.raw`^${RACK_PART}(?:${SEP}(?:${SHELF_WORD}${SEP})?([A-Z])(?:${SEP}(?:${BIN_WORD}${SEP})?0*(\d{1,4}))?)?$`
 );
-const RACK_RE = /^R?\s*-?\s*0*(\d{1,3})$/;
+const RACK_RE = new RegExp(String.raw`^${RACK_PART}$`);
 
-/** Words people write around the coordinates (English + Malay). */
-function stripWords(s) {
-  return s
-    .replace(/\b(RACK|RAK|R\.)\s*/g, 'R')
-    .replace(/\b(SHELF|LEVEL|TINGKAT|PARA|BIN|POSITION|POS|SLOT|PETAK|NO\.?)\b/g, ' ')
-    .trim();
+/** Hyphen look-alikes that AutoCorrect / copy-paste produce: ‐ ‑ ‒ – — ― − ﹘ ﹣ － */
+const DASHES = /[‐-―−﹘﹣－]/g;
+
+function prepare(input) {
+  return String(input).replace(DASHES, '-').replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
 /** Zero-pad a rack number to 2 digits: 3 -> "R03", 12 -> "R12", 105 -> "R105". */
@@ -26,13 +31,10 @@ export function formatRack(num) {
   return `R${String(Number(num)).padStart(2, '0')}`;
 }
 
-/**
- * Normalize a rack identifier ("r3", "3", "R003", "Rack 3") to "R03", or null.
- */
+/** Normalize a rack identifier ("r3", "3", "R003", "Rack 3") to "R03", or null. */
 export function normalizeRack(input) {
   if (input === null || input === undefined) return null;
-  const s = stripWords(String(input).trim().toUpperCase());
-  const m = RACK_RE.exec(s);
+  const m = RACK_RE.exec(prepare(input));
   return m ? formatRack(m[1]) : null;
 }
 
@@ -46,8 +48,7 @@ export function parseLocation(input) {
   const raw = String(input).trim();
   if (raw === '') return empty;
 
-  const s = stripWords(raw.toUpperCase());
-  const m = LOCATION_RE.exec(s);
+  const m = LOCATION_RE.exec(prepare(raw));
   if (!m) return { ...empty, locationCode: raw };
 
   const rack = formatRack(m[1]);

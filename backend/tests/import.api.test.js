@@ -394,12 +394,13 @@ describe('POST /api/import - upsert by code', () => {
     expect(byCode('TNT-004').quantity).toBe(6);
   });
 
-  it('re-importing the same file is idempotent (second time = all updates)', async () => {
+  it('re-importing the same file is idempotent (second time = all unchanged)', async () => {
+    // Rows that change nothing are counted as `unchanged`, not `updated` (lead nit: no-op re-import).
     const file = csv([['Code', 'Name'], ['TNT-004', 'Old tent'], ['NEW-1', 'New']]);
     const first = await upload(app, file, 'a.csv', real);
     const second = await upload(app, file, 'a.csv', real);
-    expect(first.body).toMatchObject({ created: 1, updated: 1 });
-    expect(second.body).toMatchObject({ created: 0, updated: 2 });
+    expect(first.body).toMatchObject({ created: 1, updated: 0, unchanged: 1 });
+    expect(second.body).toMatchObject({ created: 0, updated: 0, unchanged: 2 });
     expect(count()).toBe(2);
   });
 });

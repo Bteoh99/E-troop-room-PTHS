@@ -34,27 +34,53 @@ for (const [field, aliases] of Object.entries(HEADER_ALIASES)) {
   });
 }
 
+/** Headers that, when they lose the "name" slot to a better column, are really remarks. */
+const NOTES_FALLBACK = new Set(['description', 'keterangan'].map(normalizeHeader));
+
 /**
  * Map a header row to field -> column index.
+ * When several columns match the same field, the highest-priority alias wins; the others are
+ * reported in `shadowed` (and a losing "Description"/"Keterangan" becomes notes if no notes column exists).
  * @param {unknown[]} headerCells
- * @returns {{ mapping: Record<string, number>, unmapped: string[] }}
+ * @returns {{ mapping: Record<string, number>, unmapped: string[],
+ *   shadowed: { index: number, header: string, field: string, winner: string }[],
+ *   ignored: string[] }}  ignored = unmapped + shadowed, in column order, for display
  */
 export function mapHeaders(headerCells) {
   const best = {}; // field -> { index, priority }
+  const hits = []; // { index, header, key, field, priority }
+  const ignoredByIndex = new Map();
   const unmapped = [];
   headerCells.forEach((cell, index) => {
     const key = normalizeHeader(cell);
     if (!key) return;
+    const header = String(cell).trim();
     const hit = ALIAS_INDEX.get(key);
     if (!hit) {
-      unmapped.push(String(cell).trim());
+      unmapped.push(header);
+      ignoredByIndex.set(index, header);
       return;
     }
+    hits.push({ index, header, key, ...hit });
     const cur = best[hit.field];
     if (!cur || hit.priority < cur.priority) best[hit.field] = { index, priority: hit.priority };
   });
+
+  const shadowed = [];
+  for (const h of hits) {
+    if (best[h.field].index === h.index) continue;
+    if (h.field === 'name' && NOTES_FALLBACK.has(h.key) && !best.notes) {
+      best.notes = { index: h.index, priority: Infinity };
+      continue;
+    }
+    const winner = String(headerCells[best[h.field].index]).trim();
+    shadowed.push({ index: h.index, header: h.header, field: h.field, winner });
+    ignoredByIndex.set(h.index, `${h.header} (duplicate ${h.field} column; "${winner}" is used)`);
+  }
+
   const mapping = Object.fromEntries(Object.entries(best).map(([f, v]) => [f, v.index]));
-  return { mapping, unmapped };
+  const ignored = [...ignoredByIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, text]) => text);
+  return { mapping, unmapped, shadowed, ignored };
 }
 
 /**
@@ -62,19 +88,19 @@ export function mapHeaders(headerCells) {
  * or blank rows above the header). Picks the row with the most recognised headers,
  * preferring rows that contain both code and name.
  * @param {unknown[][]} rows
- * @returns {{ headerIndex: number, mapping: Record<string, number>, unmapped: string[] } | null}
+ * @returns {{ headerIndex: number, mapping: Record<string, number>, unmapped: string[], ignored: string[] } | null}
  */
 export function findHeaderRow(rows, maxScan = 15) {
   let best = null;
   const limit = Math.min(rows.length, maxScan);
   for (let i = 0; i < limit; i++) {
     const cells = rows[i] ?? [];
-    const { mapping, unmapped } = mapHeaders(cells);
+    const { mapping, unmapped, ignored } = mapHeaders(cells);
     const count = Object.keys(mapping).length;
     if (count === 0) continue;
     const hasRequired = REQUIRED_FIELDS.every((f) => f in mapping);
     const score = (hasRequired ? 100 : 0) + count;
-    if (!best || score > best.score) best = { headerIndex: i, mapping, unmapped, score };
+    if (!best || score > best.score) best = { headerIndex: i, mapping, unmapped, ignored, score };
     if (hasRequired && count >= 3) break;
   }
   if (!best) return null;

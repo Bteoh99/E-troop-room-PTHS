@@ -31,7 +31,8 @@ const fields = {
   category: z.preprocess(asNullableText, z.string().max(LIMITS.category).nullable()),
   locationCode: z.preprocess(asNullableText, z.string().max(LIMITS.locationCode).nullable()),
   quantity: z.preprocess(
-    (v) => (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)) ? Number(v) : v),
+    // Only plain digit strings are coerced ("0x10", "1e3" stay strings and fail).
+    (v) => (typeof v === 'string' && /^\s*\d+\s*$/.test(v) ? Number(v) : v),
     z.number({ error: 'Quantity must be a number' })
       .int('Quantity must be a whole number')
       .min(0, 'Quantity cannot be negative')
@@ -62,7 +63,11 @@ export const updateItemSchema = z.object(
   Object.fromEntries(Object.entries(fields).map(([k, s]) => [k, s.optional()]))
 );
 
-export const idParamSchema = z.coerce.number().int().positive();
+export const idParamSchema = z
+  .string()
+  .regex(/^\d{1,15}$/, 'Item id must be a positive whole number')
+  .transform(Number)
+  .refine((n) => n > 0, 'Item id must be a positive whole number');
 
 export const listQuerySchema = z.object({
   q: z.string().trim().max(200).optional(),

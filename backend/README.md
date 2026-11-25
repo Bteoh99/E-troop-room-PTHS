@@ -36,7 +36,7 @@ curl -F file=@item-template.xlsx "localhost:3001/api/import?dryRun=true"
 ## Layout
 
 ```
-src/app.js              createApp(db) + default `app` export (no listen) — use with Supertest
+src/app.js              createApp(db) + lazy default `app` (opens DB_PATH on first request; no listen)
 src/server.js           listens on PORT
 src/db/                 openDb(), migrations (schema_version table; append new versions for Phase 2)
 src/lib/location.js     parseLocation / normalizeRack / combineLocation (pure)
@@ -44,6 +44,7 @@ src/lib/headers.js      Excel header aliases (EN + Malay), mapHeaders, findHeade
 src/lib/condition.js    mapCondition (EN + Malay) (pure)
 src/lib/importRows.js   spreadsheet rows -> validated item patches, row errors/warnings (pure)
 src/lib/csv.js          CSV parser (quotes, BOM, , ; or tab delimiter, Windows-1252 fallback) (pure)
+src/lib/xlsxGuard.js    zip pre-flight: bounded inflate, row/cell caps before ExcelJS loads (pure)
 src/lib/itemSchema.js   zod schemas for create / update / query
 src/services/items.js   item queries (search ranking, racks, categories)
 src/services/importer.js  xlsx/csv reading, dry-run/real upsert, template workbook
@@ -54,8 +55,8 @@ tests/                  vitest + supertest
 
 ## Testing notes
 
-- `import { app } from '../src/app.js'` gives an app on `DB_PATH` (`:memory:` under vitest, set in
-  `vitest.config.js`; each test file runs in its own process, so it gets its own empty DB).
+- `import { app } from '../src/app.js'` gives an app on `DB_PATH`, opened on first request (`:memory:`
+  under vitest, set in `vitest.config.js`; each test file runs in its own process, so it gets its own empty DB).
 - For a fresh DB per test: `createApp(openDb(':memory:'))` (`openDb` from `src/db/index.js`).
 - `seed(db)` and `SEED_ITEMS` are exported from `scripts/seed.js`.
 
@@ -64,11 +65,18 @@ tests/                  vitest + supertest
 - Accepts `.xlsx` and `.csv` up to 5 MB, field name `file`. `dryRun` defaults to `true`.
 - Header row is auto-detected in the first 15 rows (title rows above it are fine). Headers are
   case/space/punctuation-insensitive and include Malay aliases (`Kod`, `Nama`, `Lokasi`, `Kuantiti`,
-  `Keadaan`, `Catatan`, ...). Separate `Rack` / `Shelf` / `Bin` columns are combined. Unknown columns are
-  ignored and listed in `ignoredColumns`.
+  `Keadaan`, `Catatan`, ...). Separate `Rack` / `Shelf` / `Bin` columns are combined. Unknown and
+  duplicate columns are ignored and listed in `ignoredColumns` (a losing `Description` / `Keterangan`
+  becomes notes if there is no notes column).
 - Uses the first visible sheet that has code + name headers.
 - Rows missing code or name → error, skipped. Blank rows ignored. Odd locations are kept as text
   (warning). Unknown condition → `good` (warning). Bad quantity → warning, quantity unchanged
-  (1 for new items). `"5 pcs"` → quantity 5, unit `pcs`. Same code twice → later row wins (warning).
-- Upsert by code (case-insensitive). Only columns present in the file overwrite existing values.
+  (1 for new items). `"5 pcs"` → quantity 5, unit `pcs`. Location > 100 chars → warning, not changed.
+- Upsert by code (case-insensitive). **Blank cells and missing columns never change an existing item**;
+  new items get the defaults. Counts are per distinct code: `created`, `updated`, `unchanged`
+  (unchanged items are not written). A code repeated in the file is one item (later rows on top, warning).
 - A real import runs in a single transaction; a dry run writes nothing.
+- Memory safety: before ExcelJS loads a workbook, `src/lib/xlsxGuard.js` reads the zip directory and
+  inflates each entry with a hard cap, rejecting workbooks over 25,000 rows / 240,000 cells / 48 MB of
+  XML (ExcelJS needs ~0.75 KB per cell, so the worst accepted file peaks around 200 MB). CSV parsing
+  stops early past the row limit.

@@ -87,7 +87,7 @@ describe('GET /api/items - q matching', () => {
   it.each([
     ['r3-b', ['CKG-001']],
     ['R3 B', ['CKG-001']],
-    ['r03-a-1', ['ROP-010', 'ROP-011']], // literal substring "r03-a-1" also matches R03-A-10
+    ['r03-a-1', ['ROP-010']], // exact rack/shelf/bin components: R03-A-1 does not match R03-A-10 (lead decision 8)
     ['R3 A 1', ['ROP-010']],
     ['3-a-10', ['ROP-011']],
     ['r1-b-2', ['TNT-004']],

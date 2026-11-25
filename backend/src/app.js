@@ -11,7 +11,7 @@ import { importRouter, MAX_UPLOAD_BYTES } from './routes/import.js';
 /**
  * Build the Express app around a database handle (no listen()).
  * Tests: `createApp(openDb(':memory:'))` for an isolated DB, or import the default `app`
- * (which opens DB_PATH, e.g. ':memory:' under vitest).
+ * (which opens DB_PATH on first use, e.g. ':memory:' under vitest).
  */
 export function createApp(db = openDb()) {
   const app = express();
@@ -55,9 +55,26 @@ function toErrorResponse(err) {
   }
   if (err?.type === 'entity.parse.failed') return { status: 400, body: body('Request body is not valid JSON') };
   if (err?.type === 'entity.too.large') return { status: 413, body: body('Request body too large') };
+  if (err?.type === 'charset.unsupported' || err?.type === 'encoding.unsupported') {
+    return { status: 400, body: body('Unsupported request body encoding; send JSON as UTF-8') };
+  }
+  // Any other client error raised by middleware (body-parser, busboy, ...): 400 with a safe message.
+  const status = err?.status ?? err?.statusCode;
+  if (Number.isInteger(status) && status >= 400 && status < 500) {
+    return { status: status === 413 ? 413 : 400, body: body(err.expose && err.message ? err.message : 'Bad request') };
+  }
   if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') return { status: 409, body: body('Duplicate item code') };
   return { status: 500, body: body('Internal server error') };
 }
 
-export const app = createApp();
+/**
+ * Default app on DB_PATH, created on first request (importing this module has no side effects).
+ * Works anywhere an Express app does: supertest `request(app)`, `http.createServer(app)`.
+ */
+let defaultApp = null;
+export function getDefaultApp() {
+  defaultApp ??= createApp(openDb());
+  return defaultApp;
+}
+export const app = (req, res, next) => getDefaultApp()(req, res, next);
 export default app;

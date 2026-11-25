@@ -20,16 +20,18 @@ export function migrate(db) {
     name       TEXT NOT NULL,
     applied_at TEXT NOT NULL
   )`);
-  const current = db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM schema_version').get().v;
+  const currentVersion = db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM schema_version');
   const record = db.prepare('INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)');
   for (const m of migrations) {
-    if (m.version <= current) continue;
+    // IMMEDIATE takes the write lock first, and the version is re-read inside it, so two processes
+    // starting on a fresh DB (e.g. `npm run seed` while `npm run dev` boots) never apply a step twice.
     db.transaction(() => {
+      if (currentVersion.get().v >= m.version) return;
       db.exec(m.sql);
       record.run(m.version, m.name, new Date().toISOString());
-    })();
+    }).immediate();
   }
-  return db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
+  return currentVersion.get().v;
 }
 
 /** Open (creating if needed) and migrate a SQLite database. */

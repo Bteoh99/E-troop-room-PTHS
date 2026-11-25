@@ -37,15 +37,18 @@ export function detectDelimiter(text) {
 
 /**
  * @param {string} text
+ * @param {string} [delimiter] auto-detected when omitted
+ * @param {{ maxRows?: number, maxCells?: number }} [limits] stop early (throws a RangeError) on huge input
  * @returns {string[][]} rows of cells (row i = line i+1 of the file, counting quoted newlines as one record)
  */
-export function parseCsv(text, delimiter) {
+export function parseCsv(text, delimiter, { maxRows = Infinity, maxCells = Infinity } = {}) {
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   const d = delimiter ?? detectDelimiter(text);
   const rows = [];
   let row = [];
   let field = '';
   let inQuotes = false;
+  let cells = 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (inQuotes) {
@@ -60,10 +63,13 @@ export function parseCsv(text, delimiter) {
     } else if (ch === d) {
       row.push(field);
       field = '';
+      if (++cells > maxCells) throw new RangeError('CSV_TOO_MANY_CELLS');
     } else if (ch === '\n' || ch === '\r') {
       if (ch === '\r' && text[i + 1] === '\n') i++;
       row.push(field);
       rows.push(row);
+      if (rows.length > maxRows) throw new RangeError('CSV_TOO_MANY_ROWS');
+      if (++cells > maxCells) throw new RangeError('CSV_TOO_MANY_CELLS');
       row = [];
       field = '';
     } else field += ch;

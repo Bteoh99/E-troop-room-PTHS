@@ -24,7 +24,7 @@ export const PREVIEW_KEYS = [
 ].sort();
 
 export const IMPORT_KEYS = [
-  'dryRun', 'created', 'updated', 'skipped', 'errors', 'preview', 'headerRow', 'columns', 'ignoredColumns',
+  'dryRun', 'created', 'updated', 'unchanged', 'skipped', 'errors', 'preview', 'headerRow', 'columns', 'ignoredColumns',
 ].sort();
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;

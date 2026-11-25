@@ -116,22 +116,58 @@ export function deleteItem(db, id) {
   if (info.changes === 0) throw notFound(`Item ${id} not found`);
 }
 
-const SEARCH_FIELDS = ['code', 'name', "COALESCE(category, '')", "COALESCE(location_code, '')", 'notes'];
+/** SQLite's lower() only folds A-Z; register a Unicode-aware fold() (JS toLowerCase) once per db. */
+const folded = new WeakSet();
+function ensureFold(db) {
+  if (folded.has(db)) return;
+  db.function('fold', { deterministic: true }, (v) => (v === null || v === undefined ? null : String(v).toLowerCase()));
+  folded.add(db);
+}
+
+const TEXT_FIELDS = ['code', 'name', 'category', 'notes'];
+const contains = (fields, param) =>
+  '(' + fields.map((f) => `instr(fold(COALESCE(${f}, '')), @${param}) > 0`).join(' OR ') + ')';
+
+/** A query or word that names a coordinate: has a letter (so "2" stays text) and parses to a rack. */
+function asCoordinate(text) {
+  if (!/[a-z]/i.test(text)) return null;
+  const loc = parseLocation(text);
+  return loc.rack ? loc : null;
+}
+
+/** SQL matching an item's parsed rack/shelf/bin exactly (so R03-B-1 does not match R03-B-10). */
+function locationMatch(loc, params, prefix) {
+  params[`${prefix}r`] = loc.rack;
+  const parts = [`rack = @${prefix}r`];
+  if (loc.shelf) {
+    params[`${prefix}s`] = loc.shelf;
+    parts.push(`shelf = @${prefix}s`);
+  }
+  if (loc.bin !== null) {
+    params[`${prefix}b`] = loc.bin;
+    parts.push(`bin = @${prefix}b`);
+  }
+  return '(' + parts.join(' AND ') + ')';
+}
 
 /**
  * List / search items.
- * - q: every whitespace-separated word must appear (case-insensitive) in code, name, category,
- *   locationCode or notes. A q that looks like a coordinate ("r3-b", "R3 B 2") also matches the
- *   normalized location ("R03-B..."). Ranking: exact code, code prefix, name prefix, others; ties by name.
- * - category (case-insensitive exact), rack ("3", "r3", "R03"), condition.
+ * - q as a whole is a coordinate ("r3-b", "R3 B 2", "rack 3"): items at that rack/shelf/bin (exact
+ *   components), plus items whose code/name/category/notes contain q.
+ * - otherwise every whitespace-separated word must match (case-insensitive, Unicode-aware):
+ *   a coordinate word ("r1") matches that rack/shelf/bin or code/name/category/notes; any other word
+ *   matches code, name, category, locationCode text or notes.
+ * - Ranking: exact code, exact location, code prefix, name prefix, others; ties by name.
+ * - Filters: category (case-insensitive exact), rack ("3", "r3", "R03"), condition.
  */
 export function listItems(db, { q, category, rack, condition } = {}) {
+  ensureFold(db);
   const where = [];
   const params = {};
 
   if (category) {
-    where.push('category = @category COLLATE NOCASE');
-    params.category = category;
+    where.push('fold(category) = @category');
+    params.category = category.toLowerCase();
   }
   if (rack) {
     params.rack = normalizeRack(rack) ?? rack.toUpperCase();
@@ -142,34 +178,34 @@ export function listItems(db, { q, category, rack, condition } = {}) {
     params.condition = condition;
   }
 
-  const query = (q ?? '').trim();
+  const query = (q ?? '').trim().replace(/\s+/g, ' ');
   let orderBy = 'code COLLATE NOCASE';
   let rankSelect = '';
   if (query) {
     const ql = query.toLowerCase();
-    params.q = query;
     params.ql = ql;
-    const tokens = [...new Set(ql.split(/\s+/).filter(Boolean))].slice(0, 8);
-    const tokenClauses = tokens.map((t, i) => {
-      params[`t${i}`] = t;
-      return '(' + SEARCH_FIELDS.map((f) => `instr(lower(${f}), @t${i}) > 0`).join(' OR ') + ')';
-    });
-    let textMatch = tokenClauses.join(' AND ');
-
-    // Coordinate-style query, e.g. "r3-b" -> also match location_code "R03-B" / "R03-B-…".
-    const loc = /[a-z]/i.test(query) ? parseLocation(query) : null;
-    if (loc?.rack) {
-      params.loc = loc.locationCode;
-      params.locPrefix = `${loc.locationCode}-`;
-      textMatch = `(${textMatch}) OR location_code = @loc OR substr(location_code, 1, length(@locPrefix)) = @locPrefix`;
+    params.loc = null;
+    const whole = asCoordinate(query);
+    if (whole) {
+      params.loc = whole.locationCode;
+      where.push(`(${locationMatch(whole, params, 'w')} OR ${contains(TEXT_FIELDS, 'ql')})`);
+    } else {
+      const tokens = [...new Set(ql.split(' '))].slice(0, 8);
+      tokens.forEach((t, i) => {
+        params[`t${i}`] = t;
+        const loc = asCoordinate(t);
+        where.push(loc
+          ? `(${locationMatch(loc, params, `c${i}`)} OR ${contains(TEXT_FIELDS, `t${i}`)})`
+          : contains([...TEXT_FIELDS, 'location_code'], `t${i}`));
+      });
     }
-    where.push(`(${textMatch})`);
     rankSelect = `, CASE
-        WHEN code = @q COLLATE NOCASE THEN 0
-        WHEN substr(lower(code), 1, length(@ql)) = @ql THEN 1
-        WHEN substr(lower(name), 1, length(@ql)) = @ql THEN 2
-        ELSE 3 END AS search_rank`;
-    orderBy = 'search_rank, name COLLATE NOCASE, code COLLATE NOCASE';
+        WHEN fold(code) = @ql THEN 0
+        WHEN @loc IS NOT NULL AND location_code = @loc THEN 1
+        WHEN substr(fold(code), 1, length(@ql)) = @ql THEN 2
+        WHEN substr(fold(name), 1, length(@ql)) = @ql THEN 3
+        ELSE 4 END AS search_rank`;
+    orderBy = 'search_rank, fold(name), name, code COLLATE NOCASE';
   }
 
   const sql = `SELECT *${rankSelect} FROM items ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${orderBy}`;

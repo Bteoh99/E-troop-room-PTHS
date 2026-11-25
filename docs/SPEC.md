@@ -64,9 +64,20 @@ Errors: `{ "error": { "message": string, "details"?: any } }` with proper status
 | GET | `/api/import/template` | downloads `item-template.xlsx` with header row + 2 example rows |
 
 ### Backend implementation notes (additive; nothing in the table above changed)
-- `GET /api/items`: `q` with several words matches items containing **all** words; a coordinate-like `q` (`r3-b`, `R3 B 2`) also matches the normalized `locationCode`. `rack` filter accepts `3`, `r3`, `R03`. Invalid `condition` → 400.
+- Location parsing: the text must **start with a rack** (`3`, `R3`, `Rack 3`, `Rak 3`). Shelf/bin words (`Shelf`, `Level`, `Tingkat`, `Bin`, `Slot`, `Petak`, ...) are only understood after a rack, so `Bin 5` / `Tingkat 2` are kept as text (rack null). En/em dashes (`R03–B–2`) count as separators.
+- `GET /api/items`: case-insensitive matching is Unicode-aware (`öl` finds `Ölfass`). If the whole `q` is a coordinate (`r3-b`, `R3 B 2`, `R03-B-1`), it matches items whose rack/shelf/bin **components** are equal (so `R03-B-1` does not match `R03-B-10`), plus items whose code/name/category/notes contain `q`. Otherwise every word of `q` must match; a coordinate word (`tent r1`) matches that rack/shelf/bin. Ranking: exact code, **exact location**, code prefix, name prefix, others; ties by name. `rack` filter accepts `3`, `r3`, `R03`. Invalid `condition` → 400.
 - `GET /api/racks/:rack`: accepts `r3` / `3`; **404** if the rack has no items, 400 if not a rack. Response also has `"unshelved": Item[]` (items with a rack but no shelf, e.g. location `R03`).
-- `POST /api/import`: `dryRun` **defaults to `true`** when omitted (pass `dryRun=false` to write). Extra response fields: `headerRow` (sheet row of the detected header), `columns` (field → column index), `ignoredColumns` (unrecognised headers). Each `preview` entry also has `row` (sheet row number), `action` (`"create"|"update"`) and `id` (null for new items). Entries in `errors` whose message starts with `Warning:` are warnings — the row was still imported and is **not** counted in `skipped`. Upsert only overwrites fields whose column exists in the file. A file without recognisable code + name columns → 400 (`details.missingColumns`, `details.headersFound`); wrong type → 400; > 5 MB → 413.
+- `POST /api/import`:
+  - `dryRun` **defaults to `true`** when omitted (pass `dryRun=false` to write).
+  - Extra response fields: `unchanged` (count), `headerRow` (sheet row of the detected header), `columns` (field → column index), `ignoredColumns` (strings: unrecognised headers, and duplicate columns as e.g. `"ID (duplicate code column; \"Code\" is used)"`). A losing `Description`/`Keterangan` column becomes `notes` when there is no notes column.
+  - Counts are per **distinct code**: `created` (new), `updated` (existing item that changes), `unchanged` (existing item the file leaves as is; not written, `updatedAt` kept). A code repeated in the file is one item: later rows apply on top (warning), and its single preview entry shows the final values.
+  - Each `preview` entry also has `row` (sheet row number, first row of that code), `action` (`"create" | "update" | "unchanged"`) and `id` (null only for new items).
+  - Entries in `errors` whose message starts with `Warning:` are warnings: the row was still imported and is **not** counted in `skipped`.
+  - **A blank cell never changes an existing item** (any field); new items get the defaults. So an import cannot clear a field: use the edit screen for that. Columns absent from the file are also left unchanged.
+  - A location longer than 100 characters → warning, location left unchanged (null for new items); via the API it is still a 400.
+  - Errors: no recognisable code + name columns → 400 (`details.missingColumns`, `details.headersFound`); wrong type, malformed upload, or a workbook too big once unpacked (more than 25,000 rows, 240,000 cells or 48 MB of XML) → 400; more than 20,000 data rows → 400; > 5 MB → 413.
+- Malformed JSON / unsupported charset / malformed multipart → 400 with the standard error shape.
+- Phase 2 note: `DELETE /api/items/:id` is a hard delete. Before loans reference `items.id`, switch to `ON DELETE RESTRICT` + map the FK error to 409, or soft delete.
 
 ### Excel column mapping (header row, case/space-insensitive)
 The quartermaster's real file will arrive later, so be flexible. Map these header aliases:

@@ -2,7 +2,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
-import { asyncHandler, badRequest, zodDetails } from '../lib/errors.js';
+import { asyncHandler, badRequest, HttpError, zodDetails } from '../lib/errors.js';
 import { buildTemplate, importItems } from '../services/importer.js';
 
 export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -22,6 +22,18 @@ const upload = multer({
   },
 });
 
+/**
+ * multer + busboy raise plain Errors for broken multipart bodies ("Unexpected end of form",
+ * "Multipart: Boundary not found", ...). Those are client errors: report them as 400.
+ */
+const single = upload.single('file');
+function receiveFile(req, res, next) {
+  single(req, res, (err) => {
+    if (!err || err instanceof HttpError || err instanceof multer.MulterError) return next(err);
+    next(badRequest('The upload was incomplete or malformed. Send the file as multipart/form-data in a field named "file".'));
+  });
+}
+
 const importQuerySchema = z.object({
   // Defaults to a dry run so a missing flag can never write by accident.
   dryRun: z.enum(['true', 'false', '1', '0']).optional().transform((v) => v !== 'false' && v !== '0'),
@@ -38,7 +50,7 @@ export function importRouter(db) {
     res.end(buf);
   }));
 
-  router.post('/', upload.single('file'), asyncHandler(async (req, res) => {
+  router.post('/', receiveFile, asyncHandler(async (req, res) => {
     const q = importQuerySchema.safeParse(req.query);
     if (!q.success) throw badRequest('Invalid query parameters: dryRun must be true or false', zodDetails(q.error));
     if (!req.file) throw badRequest('No file uploaded. Send the file in a multipart/form-data field named "file".');
