@@ -99,3 +99,97 @@ The suite starts the real backend with a fresh temp SQLite DB and `npm run seed`
 - E2E servers ran on backend `:3401` and Vite `:5473` with temp DBs. All servers were stopped afterwards.
 - Failure screenshots from the last run are in `frontend/test-results/`, which is gitignored.
 - Tests import the backend's `location.js` and `exceljs` read-only. Nothing in `backend/` was modified.
+
+---
+
+## Round 2 (re-test after commit 74d6d68)
+
+Date: 2026-11-25. E2E ran on backend `:3401` and Vite `:5473`, each run with a fresh temp DB and `--trace off`. All servers were stopped afterwards.
+
+### Results
+
+| Suite | Tests | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| Vitest (all files, incl. developer's `round2.test.tsx` and my `round2-tester.test.tsx`) | 245 | 241 | **4** | 0 |
+| Playwright (`smoke`, `store`, developer's `round2`, my `round2-tester`; desktop and mobile-360) | 68 | 63 | **4** | 1 (360-px-only test on desktop) |
+
+`npm run typecheck` passes.
+
+All 8 failures are **app bugs**. They come from 3 distinct bugs plus 1 minor race (R2-1 to R2-4 below). No failure is caused by a test bug.
+
+### Round 1 bugs: both fixed
+- **Bug 1 (Back after saving an edit goes back to the form): fixed.** The round-1 tests now pass: vitest *after saving, the detail page Back link…* and e2e *after saving an edit, Back…* (desktop and 360). New tests also pass:
+  - browser Back after save
+  - two edit/save cycles in a row
+  - Cancel after a failed (409) save
+  - Forward after Back
+- **Bug 2 (no inline errors on Category and Location): fixed.** Both fields now get `aria-invalid` and an inline message.
+
+### The 2 assertions the developer changed in `tests/itemForm.test.tsx`
+Both changes are **legitimate**:
+1. The summary for a backend 400 now reads "Please fix the highlighted fields." instead of the raw "Validation failed". This follows the lead's decision on friendlier wording, and the per-field messages are still asserted.
+2. The Category message is now "Category can be at most 100 characters" instead of raw zod text ("Too big: …"). The developer also added stricter checks: a matching Location message, and no raw "Too big" or "expected string" text anywhere in the summary.
+
+Neither change weakens what the tests check.
+
+### New bugs found in round 2
+
+**R2-1 (medium, history): an edit form opened directly (first history entry) leaves itself behind in history**
+- Failing tests:
+  - vitest *edit opened directly (first entry) → Cancel → Back does not reopen the cancelled form*
+  - vitest *… → "Back to item" → Back does not reopen the form*
+  - e2e *edit opened by URL → Cancel → Back does not reopen the cancelled form* (desktop and 360)
+- Steps:
+  1. Open `/items/5/edit` directly, for example from a bookmark, a shared link or a new tab.
+  2. Click **Cancel** or **‹ Back to item**. The detail page opens.
+  3. Click **‹ Back**.
+- Expected: you go to the search (`/`), like after *saving* a directly opened edit, which works.
+- Actual: you go back to `/items/5/edit`, the form you just cancelled.
+- Cause: `backToItem` only intercepts the click when the entry is not the root entry. On the root entry the `<Link>` *pushes* `/items/5` without `{ root: true }` state. On the new entry `isRootEntry` is false, so the detail page's Back runs `navigate(-1)`.
+- Fix idea: in the root case, `navigate('/items/5', { replace: true, state: replaceState(location) })`. This is what the save path already does.
+
+**R2-2 (low): bin 0 is accepted but never highlighted**
+- Failing tests:
+  - vitest *bin 0 (accepted by the parser, e.g. "R03-B-0") is highlighted*
+  - e2e *bin 0 … is still highlighted on the detail page* (desktop and 360)
+- Steps: save an item with location `r6-a-0`. Both parsers accept it as `R06-A-0` with bin 0. Then open the item.
+- Expected: the rack diagram marks the item's bin, or the location is refused or warned about.
+- Actual: shelf A gets "◀ here", but no bin carries the 📍. The screen-reader summary still says "Highlighted: shelf A, bin 0". The bug is in `binColumns`, which always draws bins from 1 upwards.
+- This needs a product decision. Either draw a bin 0 column, or have the frontend and backend parsers reject bin 0.
+
+**R2-3 (low, race): the Search tab does not clear a query typed less than 200 ms before**
+- Failing test: vitest *Search tab clicked while a just-typed query is still debouncing also clears it*.
+- Steps:
+  1. On `/`, type `rope`.
+  2. Click the **Search** tab within the 200 ms debounce.
+- Expected: the box is empty and the URL is `/`.
+- Actual: the box keeps `rope`, and when the debounce fires the URL becomes `/?q=rope`.
+- Cause: the URL→box sync only runs when `?q=` *changes*. It was already empty, so clicking the tab changes nothing that the page sees.
+- Rare in practice, but it is the case where "Search clears" visibly fails.
+
+### Re-test checklist
+| Area | Result |
+|---|---|
+| Back after edit (link and browser Back, repeated saves, failed save then Cancel, Forward) | Pass |
+| Back after an edit opened directly: **save** | Pass |
+| Back after an edit opened directly: **Cancel / Back to item** | **Fail: R2-1** |
+| Back after delete (browser Back never shows "not found"); Back after add skips the add form | Pass |
+| Flash shown once only (not again after Back) | Pass |
+| Rack diagram with many bins at 360 px: 30 bins plus a highlight on bin 27; also 40 bins and bin 9999 | Pass. Highlighted bin stays in the viewport and ≥ 24 px wide, no sideways page scroll on detail or rack pages, gap collapsed for 9999 |
+| Rack diagram, bin 0 | **Fail: R2-2** |
+| Search tab and logo clear the query and category; browser Back restores the query | Pass |
+| Search tab inside the debounce window | **Fail: R2-3** |
+| Unknown category in the URL, `&` and spaces round-trip, category kept while typing | Pass |
+| Focus on route change: h1 after link and tab clicks; search box keeps focus when going to Search; no focus move on first load; typing and category changes never steal focus; failed submit focuses the summary; error page parks focus on `<main>` then the h1 after retry; h1 after save via Back; not-found h1; Tab from the h1 reaches the first rack tile (real browser) | Pass |
+| `/items/abc`, `/1.5`, `/-1`, `/7abc`, `/%20`: not-found with no API call and no Try again; `/items/0` (400) and `/items/abc/edit` not-found; 500 still offers Try again | Pass |
+| `/racks/foo`, `R1000`, `R03-B`, `rack`, emoji: "isn't a rack" with no API call and a map link; `/racks/9` (404) shows the empty-rack message | Pass |
+| Import: re-pick the same file (after a preview and after a 400) runs a fresh check; 429 gives a friendly message and Try again works; unchanged count shows "Already up to date" and "Unchanged"; "No change" rows; unknown action shown as-is; an all-unchanged file disables Confirm with the right text; no unchanged stat when the backend omits it | Pass |
+| Real backend: re-importing the same CSV shows "Already up to date 2", Confirm is disabled, request sequence is `dryRun=true,true,false,true` | Pass |
+
+**Test bug fixed along the way:** my first e2e focus test pressed Tab before the map had loaded, so focus fell off the end of the page. It now waits for the map, and also checks that the h1 *keeps* focus after the data loads.
+
+### New and changed test files (round 2)
+- `frontend/tests/round2-tester.test.tsx` (49 tests).
+- `frontend/e2e/round2-tester.spec.ts` (14 tests × 2 projects).
+- `frontend/tests/helpers.tsx` now has hidden Back/Forward history buttons and `browserBack()`, which simulate the browser's buttons in `MemoryRouter` tests.
+- The developer's own `tests/round2.test.tsx` and `e2e/round2.spec.ts` were not changed, and they pass.

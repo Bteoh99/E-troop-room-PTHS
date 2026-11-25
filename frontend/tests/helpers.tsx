@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { AppRoutes, routerFuture } from '../src/App';
 import type { Item } from '../src/api/types';
 import { parseLocation } from '../src/lib/location';
@@ -30,11 +30,22 @@ export function makeItem(overrides: Partial<Item> = {}): Item {
 
 function LocationProbe() {
   const loc = useLocation();
+  const navigate = useNavigate();
   return (
-    <output data-testid="current-location" hidden>
-      {loc.pathname + loc.search}
-    </output>
+    <>
+      <output data-testid="current-location" hidden>
+        {loc.pathname + loc.search}
+      </output>
+      {/* Simulates the browser's Back / Forward buttons. */}
+      <button type="button" data-testid="history-back" hidden onClick={() => navigate(-1)} />
+      <button type="button" data-testid="history-forward" hidden onClick={() => navigate(1)} />
+    </>
   );
+}
+
+/** Press the browser Back button (history -1). */
+export function browserBack(): void {
+  fireEvent.click(screen.getByTestId('history-back'));
 }
 
 /** Render the whole app (routes + layout) at `path` (or a history stack). */

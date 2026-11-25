@@ -152,3 +152,70 @@ Fix: default `reuseExistingServer` to `false` for the backend, or have the backe
 - **M2**: the bin highlight is unreadable at 360 px on racks with 7 or more bins.
 
 m1 to m6 are quick, low-risk fixes worth doing in the same pass.
+
+---
+
+## Round 2 verification (commit 74d6d68)
+
+**How I checked it.**
+- `npx tsc --noEmit` passes, and `npx vitest run` passes (11 files, 196 tests).
+- I re-ran the real backend (`PORT=3301`, fresh seeded temp DB) and Vite on :5373, and re-drove every finding with Playwright at 360×740 and 1280×800. Screenshots are in `/tmp/fe-review-shots/r2/` and `/tmp/fe-review-shots/r2-*.png`.
+- No page scrolls horizontally at either width. There are no console errors apart from the expected 404/429 responses.
+- `src/lib/location.ts` is still regex-for-regex identical to the updated `backend/src/lib/location.js`.
+
+| # | Status | Evidence |
+|---|---|---|
+| **M1** Back after edit | **Fixed** | Search `dome` → item → Edit → Save gives `/items/2` with the "Changes saved." flash and fresh data. **Back** then goes to `/?q=dome` with the box still showing "dome". Cancel then Back also gives `/?q=dome`. Deep links: `/items/3` → Edit → Save → Back gives `/`, and `/items/3/edit` → Save → Back gives `/`. Add from Map → Back gives `/map`. Delete gives the flash, and browser Back skips the deleted item (`/map`). The error-summary link focuses the field without adding a `#hash` (URL stays `/items/new`). The new flow (`navigate(-1)` when the edit form isn't the root entry, otherwise `replace` with `root` state kept) is sound, because the only links to `/items/:id/edit` are on that item's page. |
+| **M2** Rack diagram width | **Fixed** | At 360 px the highlighted bin is now ≥ 34 px, shows both 📍 and the number, and is scrolled into view inside the diagram, with no page overflow: 7, 12 and 24 bins give 34 px each; 40 and 500 bins collapse to `1 … 40` (59 px). At 1280 with 40 bins it is 192 px. The shelf label stays sticky on the left and "◀ here" on the right. A typo'd bin 500 is capped by the collapse (> 24 bins). See the new finding R2-1 for the rack page. |
+| **m1** Search tab/logo clear search | **Fixed** | Search tab gives `/` with an empty box and "All items (28)". The logo does the same. Typing still syncs `?q=` and keeps `category`. |
+| **m2** Limits/server errors | **Fixed** | Client limits mirror backend `LIMITS`. The summary reads "Location can be at most 100 characters. / Category can be at most 100 characters. / Quantity must be a whole number from 0 to 1,000,000." Location and category now get inline errors and `aria-invalid`. Raw zod text is mapped through `friendlyServerMessage`. |
+| **m3** Unknown category | **Fixed** | `/?category=NoSuchCat` shows "NoSuchCat (0)" selected. |
+| **m4** Route-change focus | **Fixed** | Map → rack puts focus on the h1 "Rack R03". Tab → Import puts it on the h1 "Import from Excel". Search → item puts it on the h1 "4-man dome tent". Tab → Search keeps focus in the autofocused box and announces "Find an item" through the polite live region. |
+| **m5** File input reset | **Fixed** | `input.value` is `""` right after a pick, so re-picking the same file fires `change` again. Not reproducible in Playwright: a file that changed on disk now gives `FileReadError` (via a 1-byte `FileReader` probe) instead of "can't reach server". The code reads correctly. |
+| **m6** Invalid id/rack | **Fixed** | `/items/abc`, `/items/abc/edit` and `/items/99999` show "We couldn't find that item". `/racks/foo` shows "“foo” isn't a rack". None of them has a Try again button, and the invalid ones make no request. |
+| **m7** Contrast | **Fixed** | Field borders (`--field-border` #93785a) are 4.14:1 on white and 3.87:1 on sand-50. Occupied bins now have a solid wood border (4.96:1) plus a dot marker, so the cue is not colour alone. |
+| **m8** e2e reuses real backend | **Fixed** | Dedicated ports :3901/:5901, `reuseExistingServer: false`, and a unique temp DB per run. |
+| n1 delete history | Fixed | See M1. |
+| n2 summary `#hash` | Fixed | See M1. |
+| n3 silent `getRack` failure | Fixed | There is now an inline "Couldn't load the other items on this rack…" message with Try again. Verified by code reading only. |
+| n4 "nothing was saved" on status 0 | **Not fixed** | Verified: an aborted `dryRun=false` request still shows "The import did not finish — nothing was saved" + "Can't reach the store-room server". The server may already have committed. Still a Nit, because re-running is upsert-safe. |
+| n5 Done card live region | Fixed | `role="status"` now wraps only the heading. |
+| n6 Preview table at 360 | Partially | A "swipe sideways to see every column" hint was added (shown below 700 px). Location is still the 5th column, off-screen at 360. |
+| n7 Map unlocated note | Fixed | |
+| n8 Chip stretch | Fixed | `justify-self: start` (see `rack-360.png`). |
+| n9 Appended CSS | Fixed | Overrides folded into their sections. `.stats` is now `auto-fit, minmax(130px, 1fr)`. |
+| n10 Placeholder | Fixed | 6.72:1. |
+| n11 Tab on edit page | Fixed | |
+
+### New findings (round 2)
+
+**R2-1 (Minor): on `/racks/:rack`, wide racks hide every occupied bin off-screen with no cue.**
+`src/components/RackDiagram.tsx:78-84` and CSS `.rack__scroll`.
+
+Without a highlight, the scroller starts at `scrollLeft = 0`. Verified with rack R07 holding items at A-24, B-7 and C-12 (`/tmp/fe-review-shots/r2-rackpage-R07-360.png`): the lead says "3 items", but the diagram shows bins 1–6 on every row, all empty. Mobile overlay scrollbars give no hint that more columns exist, so the diagram looks wrong. The same applies to the other rows on the item page, where only the highlighted bin is scrolled into view.
+
+Fix: one of
+- add an edge fade or a "scroll →" cue (like the import table hint);
+- when there is no highlight, scroll to the first occupied bin;
+- when a row has more bins than fit, show "bins 1–24, scroll for more" in the rack title.
+
+**R2-2 (Nit): duplicate React keys in the ignored-columns list.**
+`src/pages/ImportPage.tsx` `IgnoredColumns`, `key={c}`.
+
+The backend reports repeated unknown headers separately: a file with `Colour,Colour` gives `['Colour','Colour','ID (duplicate code column; …)']`. Verified: React logs "Encountered two children with the same key". Use `key={`${i}-${c}`}`.
+
+**R2-3 (Nit): the file input says "No file chosen" while a preview or error for that file is shown.**
+This is a side effect of the m5 reset (`r2-import-choose-after-pick-360.png`). The preview card names the file, so this is only mildly confusing. Optionally show "Selected: inv.csv" next to the input, or relabel the button "Choose another file" once a file is loaded.
+
+**New code reviewed, no further problems found:**
+- `lib/history.ts`: root-entry detection survives `replace`.
+- `lib/flash.ts`: the module-level queue is consumed on the next `location.key`, and was verified for save via `navigate(-1)`, add, and delete.
+- `lib/routeFocus.ts` + `PageHeading.tsx`: layout-effect marking runs before child effects, and the fallback focus on `<main>` only fires while no heading has taken focus.
+- `SearchPage` URL↔box sync: the ref guards prevent the debounce loop.
+- `ItemFormPage` error mapping (`friendlyServerMessage`, ordered summary).
+- ImportPage: 429 shows "Another import is running — please try again in a moment." with Try again. Already-imported files show "Already up to date 3", "No change" rows, a disabled Confirm, and "Every item in it already matches the store-room list." `FileReadError` is treated as fixable.
+- `playwright.config.ts`.
+
+### Round 2 verdict
+
+**Approve.** Both Majors and all eight Minors are fixed and verified in the running app, with no regressions. What remains is one new Minor, R2-1 (a scroll cue for wide racks on the rack page), plus the Nits n4, n6 (partial), R2-2 and R2-3. None of them blocks Phase 1.
