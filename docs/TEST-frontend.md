@@ -1,0 +1,101 @@
+# Frontend test report (Phase 1)
+
+Tester: Frontend Tester · Date: 2026-11-25 · Scope: `frontend/` against `docs/SPEC.md` (with the backend implementation notes)
+
+## Summary
+
+| Suite | Tests | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| Vitest (unit + component, jsdom, API client mocked) | 172 | 170 | **2** | 0 |
+| Playwright e2e (real backend + temp DB + seed, Vite dev server; projects `desktop` 1280 px and `mobile-360`) | 34 | 31 | **2** | 1 |
+
+There are 4 failures, and all of them are **app bugs**. They come from 2 distinct bugs: Bug 1 fails 1 Vitest test and 2 e2e tests (one per viewport), and Bug 2 fails 1 Vitest test. No failure is caused by a test bug. `npm run typecheck` passes, test files included.
+The 1 skipped e2e test is the 360-px layout test, which is skipped on purpose in the `desktop` project.
+The 14 Vitest tests and 2 Playwright smoke tests that were already there still pass.
+
+### How to run
+
+```bash
+cd frontend
+npm test                                    # vitest
+# e2e on non-default ports with a throw-away DB (ports are now env-configurable; defaults unchanged)
+E2E_BACKEND_PORT=3401 E2E_WEB_PORT=5473 E2E_DB_PATH=/tmp/etroop-e2e.db npx playwright test --trace off
+```
+
+`playwright.config.ts` change: new optional env vars `E2E_BACKEND_PORT` (default `3001`) and `E2E_WEB_PORT` (default `5173`). The backend web server gets `PORT`. The Vite server gets `--port` and `BACKEND_URL`, so the `/api` proxy follows the backend port. Nothing else changed, and app source was not modified.
+
+## Bugs found
+
+### Bug 1 (medium, navigation): after saving an edit, the detail page's **Back** link goes back to the edit form
+- Failing tests:
+  - `tests/itemForm.test.tsx` › *Edit item form › after saving, the detail page Back link does not return to the edit form*
+  - `e2e/store.spec.ts` › *add / edit / delete › after saving an edit, Back on the detail page returns to the search (not the edit form)*. This fails in both `desktop` and `mobile-360`.
+- Steps:
+  1. Search `?q=<code>`.
+  2. Open the item.
+  3. Click **Edit item**.
+  4. Change the quantity and click **Save changes**. You land on the detail page with "Changes saved."
+  5. Click **‹ Back**.
+- Expected: you return to the search results (`/?q=<code>`), which is the documented purpose of the Back link ("keeps the previous search text").
+- Actual: you land on `/items/:id/edit` again, a reloaded edit form. History is `/?q → /items/:id → /items/:id/edit → /items/:id`, and `navigate(-1)` lands on the edit entry.
+- Cause: `ItemFormPage` navigates after an edit with `replace: !item`. That is a push for edits and a replace only for new items. The likely fix is `replace: true` for edits as well, or navigating back to the existing detail entry.
+- Verdict: **app bug**.
+
+### Bug 2 (low, validation and a11y): backend errors for **Category** and **Location** are not shown on those fields
+- Failing test: `tests/itemForm.test.tsx` › *Add item form › shows backend errors for category / location inline on those fields too*.
+- Steps: submit the form when the backend answers 400 with `details: [{path:'category',…},{path:'locationCode',…}]`. The real backend does this for a category or location over 100 characters.
+- Expected: like code, name, quantity, unit and notes, the field gets `aria-invalid="true"`, the inline message and `aria-describedby`.
+- Actual: the messages only appear in the summary at the top. The Category and Location inputs have no inline error, no `aria-invalid` and no description. `fieldError('category' | 'location')` is never rendered.
+- Verdict: **app bug** (minor).
+
+### Observations (not failing tests, low priority, for the developer to decide)
+1. **Tab bar on the edit page:** on `/items/:id/edit` no tab is marked active. `NAV.isActive` for Search only matches `/items/\d+$`.
+2. **Search tab does not clear the search:** clicking the **Search** tab while on `/?q=tent` keeps the search. The component keeps its `text` state and re-writes `?q=tent` to the URL.
+3. **Bad rack URLs:** `/racks/abc` shows the generic "Couldn't load this rack" error (backend 400) with a **Try again** button. Retrying can never help, so a not-found-style message would be friendlier.
+4. **No test id on the empty location badge:** `LocationBadge` for an item with no location ("No location yet") has no `data-testid="location-badge"`. This is fine, but it is not consistent with the other badge states.
+
+## What is covered
+
+### Vitest (`frontend/tests/`)
+
+Shared helpers:
+- `apiMock.ts` mocks every `api.*` method with defaults.
+- `helpers.tsx` provides `makeItem`, `renderApp(path | history[])` using `MemoryRouter` with `routerFuture`, and `currentLocation()`.
+
+| File | Tests | Covers |
+|---|---:|---|
+| `search.test.tsx` | 13 | Labelled search box has autofocus. All items show on load. Result card shows code, name link, quantity and unit, category, condition text, the 📍 location badge and its description. Items with no location or a non-coordinate location are handled. **Debounce** is checked with fake timers: fast typing sends only `q=tent`, and only after `SEARCH_DEBOUNCE_MS`. Query is trimmed and synced to `?q=`. Initial `?q=` pre-fills the box. No-match empty state. Empty-store state with add and import links. Error state, then **Try again** recovers. Category filter is sent to the API and stored in the URL. Live-region result count. A stale slow response is ignored. Clicking a card opens the detail page. |
+| `itemDetail.test.tsx` | 19 | All fields shown, plus the document title. **Rack diagram highlights exactly one bin (`data-shelf=B`, `data-bin=2`)**, with shelf A on top, the "here" text marker, a bin count sized to the rack, and an SR summary. **Store map highlights only R03**, with a "Here" label and an aria-label. Shelf-only (`R03-B`) and rack-only (`R03`) locations. No location, and a non-coordinate location. 404 not-found. 500 then retry. Rack request fails, so the diagram falls back to the item. Edit link. **Delete confirmation**: dialog has `aria-modal` and focus on Cancel; Cancel restores focus; Escape and a backdrop click cancel; Tab focus trap; busy state disables the buttons; confirm calls `deleteItem(id)`, navigates to `/` and shows the flash; a failed delete shows an alert. Back link uses history (keeps `?q=`) and falls back to `/`. |
+| `itemForm.test.tsx` | 22 | Pure `validate` and `toInput`: required fields, whole-number quantity ≥ 0, uppercase code, canonical location, defaults. Default form values and condition options. **Validation:** summary gets focus, links point to the fields, `aria-invalid` and `aria-describedby` are set, and errors clear live once fixed. Fractional quantity is rejected. **Live location preview** for 4 loose inputs, plus a warning for non-coordinates (still saved as typed). Create sends a normalised payload, then shows the detail page with a flash. Submit is disabled while saving. 409 shows an error on the code field, which clears when the code is edited. 400 details are mapped to fields. Network error keeps the typed values. Edit form: pre-filled, `updateItem` payload, clearing the location sends `null`, unknown id shows not-found, Back after save (**Bug 1**). Inline Category and Location errors (**Bug 2**). |
+| `import.test.tsx` | 14 | `checkFile` (type and the 5 MB limit), warning vs problem split, friendly error wording. Template link. Wrong type and over 5 MB are rejected on the client with no API call. **Dry run starts automatically** with `importFile(file, true)` while showing "Checking…" with the input disabled. Shows counts, the problems table, the warnings table (with "Warning:" stripped), ignored columns and preview rows. **Confirm import** sends `importFile(file, false)` and shows the finished summary and links, then "Import another file". Confirm is disabled when there is nothing to import. "Choose a different file". 400 `missingColumns` shows a hint, the template link and no retry. 413 message. A network failure during the real import says nothing was saved, and retry repeats the real import. Step indicator uses `aria-current`. |
+| `mapRack.test.tsx` | 16 | Map tiles show counts, a shelf span and links. Unlocated-items note (plural and singular). Empty state. Error, then retry. Tap a tile to open the rack view. Rack param `r3`, `3`, `R03` and `R3` all become `R03`. Items grouped by shelf in bin order, "No bin", an unshelved section and links. Occupied bins are marked. 404 empty state. Layout: skip link, labelled nav with 4 tabs, `aria-current`. 404 route. Flash message has a live region and can be dismissed. |
+| `components.test.tsx` | 14 | `ConditionChip` shows text plus a symbol for all 4 conditions (never colour alone). `LocationBadge` states. `RackDiagram` sizing, highlight and defaults. `StoreMap` highlight and non-link mode. `describeLocation`, `shelfRange`. |
+| `apiClient.test.ts` | 10 | Query building (skips empty filters). Signal pass-through. POST, PUT and DELETE (204). List unwrapping. URL encoding. Multipart import with no JSON content type and the `dryRun` flag. Error envelope becomes `ApiError(message, status, details)`. Non-JSON errors. Network failure gives status 0. AbortError is re-thrown. |
+| `locationParity.test.ts` | 50 | The frontend `parseLocation` and `normalizeRack` give **identical output to the backend parser** (`backend/src/lib/location.js`, read-only) for 40 + 10 inputs, including loose, Malay-word, odd-separator, out-of-range and garbage inputs. This guarantees the form preview shows exactly what will be saved. All pass. |
+| `location.test.ts`, `App.smoke.test.tsx` | 13 + 1 | Existing tests, unchanged. |
+
+### Playwright (`frontend/e2e/store.spec.ts` + existing `smoke.spec.ts`)
+
+The suite starts the real backend with a fresh temp SQLite DB and `npm run seed`, plus the Vite dev server. Every test runs in **both** projects, `desktop` and `mobile-360` (360×740, touch). Tests that create data use codes unique to each project and run.
+
+- **search → detail → map:** search "dome" (URL becomes `?q=dome`). The card badge shows `R01-B-2`. The detail page has exactly one highlighted bin (shelf B, bin 2, "here") and the map highlights R01. Back returns to the same search. "See everything on rack R01" opens the rack page with shelf B listed.
+- Coordinate search `?q=r3-b`: every badge contains `R03-B`.
+- No-match empty state.
+- Map page: 6 rack tiles. Tap R03 to open the rack page. `/racks/r3` is accepted.
+- Unknown item id shows not-found.
+- **Add item:** an empty submit shows the summary, which gets focus. Lower-case code. Location `r6 c 3` previews as `R06-C-3`. Category, quantity and condition. Save leads to the flash and the detail page highlighting bin 3, and the item can be found by search.
+- Duplicate code `tnt-004` gives a 409 message and `aria-invalid` on the code field.
+- **Edit item:** location `2/d/4` previews as `R02-D-4`. Quantity and notes are changed, and the detail page and map highlight R02. Also verified through the API.
+- Back after saving an edit (**Bug 1**, fails).
+- **Delete:** the dialog puts focus on Cancel, Escape keeps the item, confirm deletes it and shows the flash. Verified through the API.
+- **Import a generated .xlsx** (made with exceljs). It has a title row above the header, Malay headers (Kod/Nama/Lokasi/Kategori/Qty/Keadaan) and an unknown "Colour" column. Rows: a new item, an update of an existing code, a row with no name (problem) and an unknown condition (warning). The dry run shows 2 added, 1 updated, 1 skipped, 1 problem and 1 warning, ignores "Colour", and shows the preview row as `R02-B-3` with Update/Add new. Nothing is written by the dry run. **Confirm** gives the finished counts, and the data is verified through the API: a new item and the updated item (same id). The imported item is then found through the search UI.
+- CSV without code and name columns gets the friendly "couldn't find the … column" message, the headings found ("Barang") and the template link.
+- A `.xls` file is refused on the client.
+- Template download is `item-template.xlsx` and is a real zip/xlsx (starts with `PK`).
+- Main screens and the detail and edit pages produce **no page errors and no `console.error`** (React warnings included).
+- **360 px** (mobile project only): on `/`, `/?q=tent`, `/map`, `/racks/R01`, `/items/new`, `/import` and an item detail page, the page has no horizontal scroll, the tab bar is pinned to the bottom, every tab is at least 44 px tall, and the Delete button can be scrolled clear of the tab bar. All of these pass.
+
+## Notes
+- E2E servers ran on backend `:3401` and Vite `:5473` with temp DBs. All servers were stopped afterwards.
+- Failure screenshots from the last run are in `frontend/test-results/`, which is gitignored.
+- Tests import the backend's `location.js` and `exceljs` read-only. Nothing in `backend/` was modified.
