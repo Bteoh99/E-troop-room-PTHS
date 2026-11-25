@@ -76,6 +76,12 @@ describe('POST /api/items', () => {
     expect(res.body).toMatchObject({ locationCode: 'Store cupboard', rack: null, shelf: null, bin: null });
   });
 
+  it('a location like "Shelf 3" names no rack, so it is kept as text', async () => {
+    const res = await request(app).post('/api/items').send({ code: 'X2', name: 'Box', locationCode: 'Shelf 3' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ locationCode: 'Shelf 3', rack: null, shelf: null, bin: null });
+  });
+
   it('ignores id / timestamps / rack / shelf / bin in the body (derived from locationCode)', async () => {
     const res = await request(app).post('/api/items').send({
       id: 999, code: 'X1', name: 'Box', locationCode: 'R03-B-2', rack: 'R09', shelf: 'Z', bin: 77,
