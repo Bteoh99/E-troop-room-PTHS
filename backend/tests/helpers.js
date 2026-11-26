@@ -1,26 +1,61 @@
 // Shared test helpers. Every helper works on a fresh in-memory database; nothing touches data/store.db.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import ExcelJS from 'exceljs';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
 import { seed } from '../scripts/seed.js';
+import { readConfig, setPin } from '../src/auth/config.js';
+import { signToken } from '../src/auth/tokens.js';
 
-/** Fresh app + db (in-memory). */
-export function makeApp({ seeded = false } = {}) {
+/** Cheap scrypt cost for tests only (production uses SCRYPT_DEFAULTS). */
+export const TEST_SCRYPT = { N: 1024 };
+export const TEST_PIN = '2468';
+
+/** A fresh temp folder (removed when the test process exits). */
+export function tmpDir(prefix = 'etroop-test-') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  process.once('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/** A temp config.json with a known leader PIN. Returns { configPath, pin, token }. */
+export function makeLeaderConfig(pin = TEST_PIN) {
+  const configPath = path.join(tmpDir('etroop-config-'), 'config.json');
+  setPin(configPath, pin, TEST_SCRYPT);
+  const { token } = signToken(readConfig(configPath).tokenSecret);
+  return { configPath, pin, token };
+}
+
+let sharedLeader = null;
+
+/**
+ * Fresh app + db (in-memory) with a leader PIN set up (temp CONFIG_PATH).
+ * - `app` sends the leader token automatically (unless the request sets its own Authorization header),
+ *   so tests of items/import behaviour do not have to log in.
+ * - `publicApp` is the same server without the automatic token (for PIN / auth tests).
+ */
+export function makeApp({ seeded = false, leader = sharedLeader ??= makeLeaderConfig(), ...opts } = {}) {
   const db = openDb(':memory:');
   if (seeded) seed(db);
-  const app = createApp(db);
-  return { app, db };
+  const publicApp = createApp(db, { configPath: leader.configPath, staticDir: false, ...opts });
+  const app = (req, res) => {
+    if (!('authorization' in req.headers)) req.headers.authorization = `Bearer ${leader.token}`;
+    return publicApp(req, res);
+  };
+  return { app, publicApp, db, ...leader };
 }
 
 export const ITEM_KEYS = [
   'id', 'code', 'name', 'category', 'locationCode', 'rack', 'shelf', 'bin',
-  'quantity', 'unit', 'condition', 'notes', 'createdAt', 'updatedAt',
+  'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode', 'createdAt', 'updatedAt',
 ].sort();
 
 export const PREVIEW_KEYS = [
   'row', 'action', 'id', 'code', 'name', 'category', 'locationCode', 'rack', 'shelf', 'bin',
-  'quantity', 'unit', 'condition', 'notes',
+  'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode',
 ].sort();
 
 export const IMPORT_KEYS = [

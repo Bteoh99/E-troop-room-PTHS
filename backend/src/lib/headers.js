@@ -16,6 +16,9 @@ export const HEADER_ALIASES = {
   rack: ['rack', 'rak', 'rack no', 'rack number', 'no rak'],
   shelf: ['shelf', 'shelf level', 'level', 'tingkat', 'para'],
   bin: ['bin', 'bin no', 'position', 'slot', 'petak', 'kotak'],
+  brand: ['brand', 'jenama', 'manufacturer', 'make', 'pengeluar'],
+  model: ['model', 'model no', 'model number', 'no model'],
+  barcode: ['barcode', 'kod bar', 'ean', 'upc'],
 };
 
 export const REQUIRED_FIELDS = ['code', 'name'];

@@ -1,25 +1,35 @@
-# e-Troop Store Room — Backend (Phase 1)
+# e-Troop Store Room — Backend
 
-Express 4 + better-sqlite3 API for finding store items by rack coordinate (`R03-B-2`),
-editing them, and importing the inventory from Excel/CSV. The contract is `../docs/SPEC.md`.
+Express 4 + better-sqlite3 API for finding store items by rack coordinate (`R03-B-2`), editing them,
+importing the inventory from Excel/CSV and matching scanned labels/barcodes. In laptop mode it also
+serves the built frontend. The contract is `../docs/SPEC.md`; Windows laptop setup is `../docs/SETUP-WINDOWS.md`.
 
 ## Run
 
 ```bash
 cd backend
 npm install
+npm run set-pin     # leader PIN (4-8 digits); without it, adding/editing/importing returns 403
 npm run seed        # 28 sample items in R01–R06, shelves A–D (only if the DB is empty)
-npm run dev         # http://localhost:3001/api, restarts on file changes
-# or: npm start
-npm test            # vitest (uses an in-memory DB)
+npm run dev         # http://localhost:3001/api, restarts on file changes (frontend via Vite on :5173)
+npm test            # vitest (in-memory DB, temp PIN config)
+
+# Laptop / production mode: serves ../frontend/dist too, on 0.0.0.0, prints LAN URLs
+(cd ../frontend && npm ci && npm run build)
+NODE_ENV=production npm start
+npm run backup      # one backup now
 ```
 
-Environment variables:
+Settings come from environment variables or `backend/.env` (copy `.env.example`; real env vars win):
 
 | Var | Default | Notes |
 |---|---|---|
 | `PORT` | `3001` | |
+| `HOST` | `0.0.0.0` | |
 | `DB_PATH` | `data/store.db` | relative paths resolve against `backend/`; `:memory:` for tests |
+| `CONFIG_PATH` | `data/config.json` | leader PIN hash + token secret (never the PIN itself) |
+| `BACKUP_DIR` / `BACKUP_HOUR` / `BACKUP_KEEP` | `data/backups` / `21` / `30` | backup on start + daily |
+| `NODE_ENV=production` or `SERVE_FRONTEND=1` | off | serve `FRONTEND_DIST` (default `../frontend/dist`) |
 
 To start over: stop the server, delete `data/store.db*`, run `npm run seed`.
 
@@ -28,9 +38,9 @@ To start over: stop the server, delete `data/store.db*`, run `npm run seed`.
 ```bash
 curl localhost:3001/api/health
 curl "localhost:3001/api/items?q=tent"
-curl localhost:3001/api/racks
-curl -o item-template.xlsx localhost:3001/api/import/template
-curl -F file=@item-template.xlsx "localhost:3001/api/import?dryRun=true"
+TOKEN=$(curl -s -H 'content-type: application/json' -d '{"pin":"1234"}' localhost:3001/api/auth/login | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
+curl -H "Authorization: Bearer $TOKEN" -F file=@items.xlsx "localhost:3001/api/import?dryRun=true"
+curl -H 'content-type: application/json' -d '{"text":"Coleman Sundome TNT-OO4"}' localhost:3001/api/scan/match
 ```
 
 ## Layout
@@ -48,8 +58,14 @@ src/lib/xlsxGuard.js    zip pre-flight: bounded inflate, row/cell caps before Ex
 src/lib/itemSchema.js   zod schemas for create / update / query
 src/services/items.js   item queries (search ranking, racks, categories)
 src/services/importer.js  xlsx/csv reading, dry-run/real upsert, template workbook
-src/routes/             items, categories, racks, import
+src/lib/scanMatch.js    scan scoring: OCR folding, tokenising, weighted overlap (pure)
+src/lib/env.js          .env parser/loader (src/loadEnv.js applies backend/.env in entry points)
+src/auth/               leader PIN: config.json (scrypt), signed tokens, wrong-PIN rate limit, middleware
+src/services/backup.js  db.backup() to BACKUP_DIR, rotation, daily schedule
+src/routes/             items, categories, racks, import, scan
 scripts/seed.js         seed data
+scripts/set-pin.js      set/change the leader PIN (hidden prompt, --pin, --check)
+scripts/backup.js       one backup now
 tests/                  vitest + supertest
 ```
 
@@ -57,7 +73,9 @@ tests/                  vitest + supertest
 
 - `import { app } from '../src/app.js'` gives an app on `DB_PATH`, opened on first request (`:memory:`
   under vitest, set in `vitest.config.js`; each test file runs in its own process, so it gets its own empty DB).
-- For a fresh DB per test: `createApp(openDb(':memory:'))` (`openDb` from `src/db/index.js`).
+- `makeApp()` in `tests/helpers.js` gives a fresh in-memory DB with a temp leader PIN: its `app` sends the
+  leader token automatically, `publicApp` does not (for auth tests). Without a PIN the default app is in
+  setup-needed mode (writes → 403).
 - `seed(db)` and `SEED_ITEMS` are exported from `scripts/seed.js`.
 
 ## Import behaviour (tolerant on purpose — the real file arrives later)

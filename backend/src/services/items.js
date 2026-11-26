@@ -31,6 +31,9 @@ export function rowToItem(r) {
     unit: r.unit,
     condition: r.condition,
     notes: r.notes,
+    brand: r.brand,
+    model: r.model,
+    barcode: r.barcode,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -51,6 +54,9 @@ function toColumns(v) {
     unit: v.unit,
     condition: v.condition,
     notes: v.notes,
+    brand: v.brand,
+    model: v.model,
+    barcode: v.barcode,
   };
 }
 
@@ -59,7 +65,8 @@ export function buildNewItem(input) {
   const v = createItemSchema.parse(input);
   const c = toColumns(v);
   return { code: c.code, name: c.name, category: c.category, locationCode: c.location_code, rack: c.rack,
-    shelf: c.shelf, bin: c.bin, quantity: c.quantity, unit: c.unit, condition: c.condition, notes: c.notes };
+    shelf: c.shelf, bin: c.bin, quantity: c.quantity, unit: c.unit, condition: c.condition, notes: c.notes,
+    brand: c.brand, model: c.model, barcode: c.barcode };
 }
 
 /** Apply a validated partial patch to an existing Item, re-deriving the location. Pure. */
@@ -77,6 +84,18 @@ export function getItemByCode(db, code) {
   return rowToItem(stmt(db, 'SELECT * FROM items WHERE code = ? COLLATE NOCASE').get(String(code).trim()));
 }
 
+export function getItemByBarcode(db, barcode) {
+  return rowToItem(stmt(db, 'SELECT * FROM items WHERE barcode = ?').get(barcode));
+}
+
+function assertBarcodeFree(db, barcode, selfId = null) {
+  if (!barcode) return;
+  const other = getItemByBarcode(db, barcode);
+  if (other && other.id !== selfId) {
+    throw conflict(`Barcode ${barcode} is already used by item ${other.code}`, { field: 'barcode', code: other.code });
+  }
+}
+
 export function countItems(db) {
   return stmt(db, 'SELECT COUNT(*) AS n FROM items').get().n;
 }
@@ -84,10 +103,13 @@ export function countItems(db) {
 export function createItem(db, input) {
   const item = buildNewItem(input);
   if (getItemByCode(db, item.code)) throw conflict(`An item with code ${item.code} already exists`, { field: 'code' });
+  assertBarcodeFree(db, item.barcode);
   const now = new Date().toISOString();
   const info = stmt(db, `INSERT INTO items
-      (code, name, category, location_code, rack, shelf, bin, quantity, unit, condition, notes, created_at, updated_at)
-    VALUES (@code, @name, @category, @location_code, @rack, @shelf, @bin, @quantity, @unit, @condition, @notes, @now, @now)`)
+      (code, name, category, location_code, rack, shelf, bin, quantity, unit, condition, notes,
+       brand, model, barcode, created_at, updated_at)
+    VALUES (@code, @name, @category, @location_code, @rack, @shelf, @bin, @quantity, @unit, @condition, @notes,
+       @brand, @model, @barcode, @now, @now)`)
     .run({ ...toColumns(item), now });
   return getItem(db, info.lastInsertRowid);
 }
@@ -103,10 +125,11 @@ export function updateItem(db, id, input) {
       throw conflict(`An item with code ${patch.code} already exists`, { field: 'code' });
     }
   }
+  if (patch.barcode) assertBarcodeFree(db, patch.barcode, existing.id);
   const merged = mergeItem(existing, patch);
   stmt(db, `UPDATE items SET code = @code, name = @name, category = @category, location_code = @location_code,
       rack = @rack, shelf = @shelf, bin = @bin, quantity = @quantity, unit = @unit, condition = @condition,
-      notes = @notes, updated_at = @now WHERE id = @id`)
+      notes = @notes, brand = @brand, model = @model, barcode = @barcode, updated_at = @now WHERE id = @id`)
     .run({ ...toColumns(merged), now: new Date().toISOString(), id: existing.id });
   return getItem(db, existing.id);
 }
@@ -124,7 +147,7 @@ function ensureFold(db) {
   folded.add(db);
 }
 
-const TEXT_FIELDS = ['code', 'name', 'category', 'notes'];
+const TEXT_FIELDS = ['code', 'name', 'category', 'notes', 'brand', 'model', 'barcode'];
 const contains = (fields, param) =>
   '(' + fields.map((f) => `instr(fold(COALESCE(${f}, '')), @${param}) > 0`).join(' OR ') + ')';
 
@@ -157,10 +180,12 @@ function locationMatch(loc, params, prefix) {
  * - otherwise every whitespace-separated word must match (case-insensitive, Unicode-aware):
  *   a coordinate word ("r1") matches that rack/shelf/bin or code/name/category/notes; any other word
  *   matches code, name, category, locationCode text or notes.
- * - Ranking: exact code, exact location, code prefix, name prefix, others; ties by name.
- * - Filters: category (case-insensitive exact), rack ("3", "r3", "R03"), condition.
+ * - Text fields: code, name, category, notes, brand, model, barcode (+ locationCode text).
+ * - Ranking: exact code or exact barcode, exact location, code prefix, name prefix, others; ties by name.
+ * - Filters: category (case-insensitive exact), rack ("3", "r3", "R03"), condition,
+ *   unlocated (rack is null: no location or a location that is not a coordinate).
  */
-export function listItems(db, { q, category, rack, condition } = {}) {
+export function listItems(db, { q, category, rack, condition, unlocated } = {}) {
   ensureFold(db);
   const where = [];
   const params = {};
@@ -177,6 +202,7 @@ export function listItems(db, { q, category, rack, condition } = {}) {
     where.push('condition = @condition');
     params.condition = condition;
   }
+  if (unlocated) where.push('rack IS NULL');
 
   const query = (q ?? '').trim().replace(/\s+/g, ' ');
   let orderBy = 'code COLLATE NOCASE';
@@ -184,6 +210,7 @@ export function listItems(db, { q, category, rack, condition } = {}) {
   if (query) {
     const ql = query.toLowerCase();
     params.ql = ql;
+    params.bc = query.replace(/\s+/g, '').toUpperCase();
     params.loc = null;
     const whole = asCoordinate(query);
     if (whole) {
@@ -200,7 +227,7 @@ export function listItems(db, { q, category, rack, condition } = {}) {
       });
     }
     rankSelect = `, CASE
-        WHEN fold(code) = @ql THEN 0
+        WHEN fold(code) = @ql OR (barcode IS NOT NULL AND barcode = @bc) THEN 0
         WHEN @loc IS NOT NULL AND location_code = @loc THEN 1
         WHEN substr(fold(code), 1, length(@ql)) = @ql THEN 2
         WHEN substr(fold(name), 1, length(@ql)) = @ql THEN 3

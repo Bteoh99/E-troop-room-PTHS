@@ -6,7 +6,18 @@
 import { z } from 'zod';
 import { CONDITIONS } from './condition.js';
 
-export const LIMITS = { code: 50, name: 200, category: 100, locationCode: 100, unit: 30, notes: 2000, quantity: 1_000_000 };
+export const LIMITS = {
+  code: 50, name: 200, category: 100, locationCode: 100, unit: 30, notes: 2000, quantity: 1_000_000,
+  brand: 100, model: 100, barcode: 64,
+};
+
+/** "9 312345 678901" -> "9312345678901"; letters upper-cased. '' -> null. Non-strings untouched. */
+export function normalizeBarcode(v) {
+  if (typeof v === 'number') v = String(v);
+  if (typeof v !== 'string') return v;
+  const t = v.replace(/\s+/g, '').toUpperCase();
+  return t === '' ? null : t;
+}
 
 /** numbers -> strings, trim strings; leave everything else for zod to reject. */
 const asText = (v) => (typeof v === 'number' ? String(v) : typeof v === 'string' ? v.trim() : v);
@@ -30,6 +41,15 @@ const fields = {
   ),
   category: z.preprocess(asNullableText, z.string().max(LIMITS.category).nullable()),
   locationCode: z.preprocess(asNullableText, z.string().max(LIMITS.locationCode).nullable()),
+  brand: z.preprocess(asNullableText, z.string().max(LIMITS.brand, `Brand must be at most ${LIMITS.brand} characters`).nullable()),
+  model: z.preprocess(asNullableText, z.string().max(LIMITS.model, `Model must be at most ${LIMITS.model} characters`).nullable()),
+  barcode: z.preprocess(
+    normalizeBarcode,
+    z.string()
+      .max(LIMITS.barcode, `Barcode must be at most ${LIMITS.barcode} characters`)
+      .regex(/^[A-Z0-9]+$/, 'Barcode may only contain letters and digits')
+      .nullable()
+  ),
   quantity: z.preprocess(
     // Only plain digit strings are coerced ("0x10", "1e3" stay strings and fail).
     (v) => (typeof v === 'string' && /^\s*\d+\s*$/.test(v) ? Number(v) : v),
@@ -52,6 +72,9 @@ export const createItemSchema = z.object({
   name: fields.name,
   category: fields.category.optional().transform((v) => v ?? null),
   locationCode: fields.locationCode.optional().transform((v) => v ?? null),
+  brand: fields.brand.optional().transform((v) => v ?? null),
+  model: fields.model.optional().transform((v) => v ?? null),
+  barcode: fields.barcode.optional().transform((v) => v ?? null),
   quantity: fields.quantity.optional().transform((v) => v ?? 1),
   unit: fields.unit.optional().transform((v) => v ?? 'pcs'),
   condition: fields.condition.optional().transform((v) => v ?? 'good'),
@@ -76,4 +99,7 @@ export const listQuerySchema = z.object({
   condition: z.union([z.literal(''), z.enum(CONDITIONS)], {
     error: `condition must be one of: ${CONDITIONS.join(', ')}`,
   }).optional(),
+  unlocated: z.enum(['true', 'false', '1', '0', ''], { error: 'unlocated must be true or false' })
+    .optional()
+    .transform((v) => v === 'true' || v === '1'),
 });

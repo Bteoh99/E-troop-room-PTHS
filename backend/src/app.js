@@ -1,34 +1,129 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import { ZodError } from 'zod';
 import { openDb } from './db/index.js';
 import { HttpError, zodDetails } from './lib/errors.js';
+import { createAuth } from './auth/index.js';
 import { itemsRouter } from './routes/items.js';
 import { categoriesRouter } from './routes/categories.js';
 import { racksRouter } from './routes/racks.js';
 import { importRouter, MAX_UPLOAD_BYTES } from './routes/import.js';
+import { scanRouter } from './routes/scan.js';
+
+const BACKEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Content-Security-Policy for a self-hosted LAN app (no CDNs). 'wasm-unsafe-eval' lets the bundled
+ * OCR / barcode WebAssembly run; blob: workers are how tesseract.js starts its worker.
+ * No upgrade-insecure-requests / HSTS: the app is plain HTTP on the troop Wi-Fi.
+ */
+export const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval' blob:",
+  "worker-src 'self' blob:",
+  "connect-src 'self' blob: data:",
+  "img-src 'self' data: blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self' data:",
+  "manifest-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+function securityHeaders(req, res, next) {
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), payment=(), usb=()');
+  next();
+}
+
+/**
+ * Where the built frontend is, or null to not serve it.
+ * - opts.staticDir: a folder (served if it has index.html) or false.
+ * - otherwise, only in production (NODE_ENV=production or SERVE_FRONTEND=1): FRONTEND_DIST or ../frontend/dist.
+ */
+export function resolveStaticDir(staticDir) {
+  if (staticDir === false) return null;
+  let dir = staticDir;
+  if (dir === undefined) {
+    const serve = process.env.NODE_ENV === 'production' || process.env.SERVE_FRONTEND === '1';
+    if (!serve) return null;
+    dir = process.env.FRONTEND_DIST || path.join(BACKEND_ROOT, '..', 'frontend', 'dist');
+  }
+  dir = path.resolve(BACKEND_ROOT, dir);
+  return fs.existsSync(path.join(dir, 'index.html')) ? dir : null;
+}
+
+const EXTRA_TYPES = { '.wasm': 'application/wasm', '.mjs': 'text/javascript; charset=utf-8', '.webmanifest': 'application/manifest+json' };
+
+function frontend(dir) {
+  const router = express.Router();
+  router.use(express.static(dir, {
+    index: false,
+    setHeaders(res, file) {
+      const type = EXTRA_TYPES[path.extname(file).toLowerCase()];
+      if (type) res.setHeader('Content-Type', type);
+      // Vite puts content-hashed files in assets/: cache them for a year. Everything else: revalidate.
+      const rel = path.relative(dir, file).split(path.sep);
+      res.setHeader('Cache-Control', rel[0] === 'assets' ? 'public, max-age=31536000, immutable' : 'no-cache');
+    },
+  }));
+  // SPA fallback: client-side routes (/items/3, /map, ...) get index.html. Missing files stay 404.
+  const indexFile = path.join(dir, 'index.html');
+  router.get('*', (req, res, next) => {
+    if (path.extname(req.path)) return next();
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(indexFile);
+  });
+  return router;
+}
 
 /**
  * Build the Express app around a database handle (no listen()).
- * Tests: `createApp(openDb(':memory:'))` for an isolated DB, or import the default `app`
- * (which opens DB_PATH on first use, e.g. ':memory:' under vitest).
+ * Tests: `createApp(openDb(':memory:'), { configPath })` for an isolated DB, or import the default `app`
+ * (which opens DB_PATH / CONFIG_PATH on first use).
+ * @param {import('better-sqlite3').Database} [db]
+ * @param {{ configPath?: string, staticDir?: string|false, limiter?: object }} [opts]
  */
-export function createApp(db = openDb()) {
+export function createApp(db = openDb(), opts = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.locals.db = db;
+  const auth = createAuth({ configPath: opts.configPath, limiter: opts.limiter });
+  app.locals.auth = auth;
+  app.use(securityHeaders);
   app.use(express.json({ limit: '100kb' }));
 
+  const writesNeedLeader = (req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? next() : auth.requireLeader(req, res, next));
+
   const api = express.Router();
+  api.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   api.get('/health', (req, res) => res.json({ ok: true }));
-  api.use('/items', itemsRouter(db));
+  api.use('/auth', auth.router);
+  api.use('/items', writesNeedLeader, itemsRouter(db));
   api.use('/categories', categoriesRouter(db));
   api.use('/racks', racksRouter(db));
-  api.use('/import', importRouter(db));
+  api.use('/import', writesNeedLeader, importRouter(db)); // template download (GET) stays public
+  api.use('/scan', scanRouter(db)); // public
   api.use((req, res) => {
     res.status(404).json({ error: { message: `No route for ${req.method} ${req.baseUrl}${req.path}` } });
   });
   app.use('/api', api);
+
+  const dist = resolveStaticDir(opts.staticDir);
+  app.locals.staticDir = dist;
+  if (dist) app.use(frontend(dist));
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
@@ -63,7 +158,7 @@ function toErrorResponse(err) {
   if (Number.isInteger(status) && status >= 400 && status < 500) {
     return { status: status === 413 ? 413 : 400, body: body(err.expose && err.message ? err.message : 'Bad request') };
   }
-  if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') return { status: 409, body: body('Duplicate item code') };
+  if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') return { status: 409, body: body('Duplicate item code or barcode') };
   return { status: 500, body: body('Internal server error') };
 }
 

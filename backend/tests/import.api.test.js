@@ -37,6 +37,7 @@ describe('POST /api/import - response shape and dry run', () => {
     expect(res.body.preview[0]).toEqual({
       row: 2, action: 'create', id: null, code: 'TNT-004', name: '4-man dome tent', category: 'Tents',
       locationCode: 'R03-B-2', rack: 'R03', shelf: 'B', bin: 2, quantity: 6, unit: 'pcs', condition: 'good', notes: 'Green',
+      brand: null, model: null, barcode: null, // Phase 1.5 fields
     });
     expect(res.body.preview[1]).toMatchObject({ row: 3, code: 'ROP-010', condition: 'needs_repair', unit: 'coils', quantity: 12 });
     expect(count()).toBe(0);

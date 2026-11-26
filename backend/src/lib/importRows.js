@@ -10,7 +10,7 @@
 import { findHeaderRow, REQUIRED_FIELDS, HEADER_ALIASES } from './headers.js';
 import { parseLocation, combineLocation } from './location.js';
 import { mapCondition } from './condition.js';
-import { updateItemSchema, LIMITS } from './itemSchema.js';
+import { updateItemSchema, LIMITS, normalizeBarcode } from './itemSchema.js';
 import { badRequest } from './errors.js';
 
 /** Excel cell value (number/string/Date/boolean/null) -> trimmed string. */
@@ -76,9 +76,16 @@ export function buildImportPlan(rows) {
     data.name = name;
 
     // Blank cell = not given: existing value kept, new item gets the default.
-    for (const f of ['category', 'notes', 'unit']) {
+    for (const f of ['category', 'notes', 'unit', 'brand', 'model']) {
       const v = text(f);
       if (v) data[f] = v;
+    }
+
+    const barcodeText = text('barcode');
+    if (barcodeText) {
+      const bc = normalizeBarcode(barcodeText);
+      if (bc.length <= LIMITS.barcode && /^[A-Z0-9]+$/.test(bc)) data.barcode = bc;
+      else warnings.push(`Warning: barcode "${barcodeText}" must be letters/digits (max ${LIMITS.barcode}); barcode not changed`);
     }
 
     // Location: a filled location column wins; otherwise combine rack / shelf / bin columns.

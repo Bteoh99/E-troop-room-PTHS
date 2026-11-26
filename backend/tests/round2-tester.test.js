@@ -446,7 +446,9 @@ describe('R2 process-level: app import side effects and concurrent migrations', 
     for (const r of results) expect(r.code, r.err).toBe(0);
     const { openDb } = await import('../src/db/index.js');
     const db = openDb(dbFile);
-    expect(db.prepare('SELECT version FROM schema_version').all()).toEqual([{ version: 1 }]);
+    // Every migration applied exactly once (Phase 1.5 added version 2).
+    const { migrations } = await import('../src/db/migrations.js');
+    expect(db.prepare('SELECT version FROM schema_version ORDER BY version').all()).toEqual(migrations.map((m) => ({ version: m.version })));
     db.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }, 30_000);

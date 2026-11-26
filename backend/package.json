@@ -2,7 +2,7 @@
   "name": "e-troop-store-room-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "e-Troop Store Room API (Phase 1): inventory search by rack coordinate, CRUD, Excel/CSV import",
+  "description": "e-Troop Store Room API + laptop server: inventory by rack coordinate, Excel import, scan matching, leader PIN",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -11,6 +11,8 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "seed": "node scripts/seed.js",
+    "set-pin": "node scripts/set-pin.js",
+    "backup": "node scripts/backup.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

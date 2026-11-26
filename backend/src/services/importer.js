@@ -10,7 +10,7 @@ import { findHeaderRow } from '../lib/headers.js';
 import { badRequest, HttpError } from '../lib/errors.js';
 import { checkXlsx } from '../lib/xlsxGuard.js';
 import { updateItemSchema } from '../lib/itemSchema.js';
-import { buildNewItem, createItem, getItemByCode, mergeItem, updateItem } from './items.js';
+import { buildNewItem, createItem, getItemByBarcode, getItemByCode, mergeItem, updateItem } from './items.js';
 
 export const MAX_IMPORT_ROWS = 20_000; // data rows (after the header)
 export const PREVIEW_ROWS = 20;
@@ -92,10 +92,13 @@ function previewItem(item, row, action) {
     unit: item.unit,
     condition: item.condition,
     notes: item.notes,
+    brand: item.brand,
+    model: item.model,
+    barcode: item.barcode,
   };
 }
 
-const COMPARED = ['code', 'name', 'category', 'locationCode', 'quantity', 'unit', 'condition', 'notes'];
+const COMPARED = ['code', 'name', 'category', 'locationCode', 'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode'];
 const sameItem = (a, b) => COMPARED.every((k) => a[k] === b[k]);
 
 /**
@@ -146,8 +149,17 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
 
   // 1) Work out every code's final state in memory (identical for dry and real runs).
   const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (final) }
+  const barcodeOwner = new Map(); // barcode -> code, for barcodes set by this file
   for (const { row, data } of plan.records) {
     const code = data.code.toUpperCase();
+    if (data.barcode) {
+      // A barcode identifies one item: never steal it from another item (DB or earlier row).
+      const owner = barcodeOwner.get(data.barcode) ?? getItemByBarcode(db, data.barcode)?.code;
+      if (owner && owner !== code) {
+        errors.push({ row, message: `Warning: barcode ${data.barcode} already belongs to item ${owner}; barcode not changed` });
+        delete data.barcode;
+      } else barcodeOwner.set(data.barcode, code);
+    }
     const entry = byCode.get(code);
     const original = entry ? entry.original : getItemByCode(db, code);
     const current = entry ? entry.item : original;

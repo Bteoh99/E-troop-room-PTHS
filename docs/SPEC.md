@@ -160,3 +160,38 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
 3. **Needs a location** page (`/locate`, linked from the Map page "X items have no location" and from a dashboard-style badge on Search when > 0): list unlocated items (code, name, qty) each with an inline location input + live normalized preview + Save (needs leader mode). After saving, the row slides away and focus jumps to the next item's input, so a leader can walk along racks entering locations quickly. Optional "Rack prefix" helper: choose rack R03 once, then type just `B-2`.
 4. Item form/detail/search cards show brand, model, barcode when present. Form fields for them.
 5. Import preview shows brand/model/barcode columns when present.
+
+### Phase 1.5 backend implementation notes (additions to A–E; frontend please read)
+- **Item** now always has `brand`, `model`, `barcode` (null when empty). Barcode input: all whitespace removed and letters upper-cased (`"9 312345 678901"` → `"9312345678901"`); any other character → 400. Duplicate barcode → 409 `details: { field: "barcode", code: "<item that has it>" }`. Sending `""`/`null` clears a field.
+- **Search**: exact barcode (spaces ignored) ranks in the top tier with exact code. `unlocated` accepts `true|false|1|0`; combined with `q` the normal ranking applies, otherwise sorted by code.
+- **Import**: brand/model/barcode columns follow the "blank cell never changes an existing item" rule. An invalid barcode, or one that already belongs to another item (in the DB or earlier in the file) → `Warning:` and the barcode is not changed. Preview entries include `brand`, `model`, `barcode`.
+- **Scan** `POST /api/scan/match`:
+  - `matchedOn` values come from `code`, `barcode`, `brand`, `model`, `name`, `category`, `notes`. Items scoring under 0.15 are left out.
+  - A `barcode` that equals an item's **code** (OCR-folded) also counts as an exact match (score 1, `matchedOn: ["code"]`).
+  - An unknown barcode with no text → `{ matches: [] }`.
+  - Codes split over up to 5 OCR words are joined back (`TNT - 0 0 4`). OCR folding also maps `rn` → `m`.
+  - Body validation errors → 400 (empty or whitespace-only text with no barcode included).
+- **Auth**:
+  - `POST /api/auth/login` → 200 `{ token, expiresAt }`. Wrong PIN → 401 `"Wrong PIN."`. Missing `pin` → 400 (not counted as a wrong try). No PIN set → 403 (same message as for writes).
+  - Rate limited → 429 with a `Retry-After` header (seconds) and `details.retryAfterSeconds`. While blocked, even the right PIN gets 429.
+  - Writes without a valid token → 401: `"Leader PIN required. Unlock leader mode first."`, or `"Leader session expired. Enter the leader PIN again."` for an expired token. A damaged `config.json` → 503 on writes.
+  - Tokens die when the PIN is changed with `set-pin`; the running server notices the file change, no restart needed.
+  - Send the token as `Authorization: Bearer <token>`.
+- **Serving**:
+  - `frontend/dist` (or `FRONTEND_DIST`) is served only when `NODE_ENV=production` or `SERVE_FRONTEND=1`, and only if it contains `index.html`. `windows/start.bat` sets `NODE_ENV=production`.
+  - SPA fallback applies to GET paths **without a file extension**; a missing `/assets/x.js` is a real 404.
+  - `assets/*` gets `Cache-Control: public, max-age=31536000, immutable`; everything else outside `/api` gets `no-cache`; `/api/*` gets `no-store`. `.wasm` is served as `application/wasm`.
+- **Security headers on every response:**
+  - `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`.
+  - What this means for the frontend: no inline `<script>`, no CDNs, and no `eval`/`new Function` outside WebAssembly. Tell the backend if tesseract.js or zxing needs more.
+  - Also set: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy: same-origin`, and a `Permissions-Policy` that blocks geolocation, microphone, payment and USB. There is **no** HSTS or upgrade-insecure-requests, because the app runs on plain HTTP on the LAN.
+- **Laptop mode**:
+  - `HOST` defaults to `0.0.0.0`.
+  - Extra env vars: `DB_PATH`, `CONFIG_PATH`, `HOST`, `FRONTEND_DIST`, `SERVE_FRONTEND` (all optional). Real environment variables win over `backend/.env`.
+  - Backups are written as `<name>.partial`, then renamed, so a half-written file never looks like a backup. A second backup on the same day replaces that day's file.
+  - New npm scripts: `npm run set-pin [-- --pin 1234 | --check]` and `npm run backup`.
+- **Windows**:
+  - Double-click wrappers `install.bat`, `update.bat`, `stop.bat` and `uninstall.bat` were added next to the `.ps1` scripts. Each script asks for Administrator rights by itself.
+  - The startup task runs as **SYSTEM**. That is why a Google Drive backup folder must be in "Mirror files" mode.
+  - `start.bat` restarts the server 10 s after it exits. It rotates `server.log` (over 5 MB → `server.log.1`) each time the server (re)starts.
+  - The guide is `docs/SETUP-WINDOWS.md`.
