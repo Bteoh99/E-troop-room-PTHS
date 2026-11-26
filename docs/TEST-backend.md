@@ -228,3 +228,130 @@ Against `b27ebb9` these tests failed. All of them pass against `462d2b1`.
 3. Invalid UTF-8 in a JSON body is stored as U+FFFD replacement characters, with no error.
 4. Full case folding is not done: `STRASSE` does not find `Straße`, and Turkish dotted `İ` behaves as JavaScript's `toLowerCase` dictates.
 5. Review n6 (numeric shelves in separate columns) is still deferred, as agreed.
+
+---
+
+## Phase 1.5
+
+Run: `cd backend && npm test`, against commit `599115c`. Everything ran on in-memory or `os.tmpdir()` databases, with temp `CONFIG_PATH`, `BACKUP_DIR` and dist folders. `data/store.db` has the same sha256 as before, and none of these tests wrote to `data/config.json` or `data/backups/`. That folder's `store-2026-11-26.db` comes from someone else's running server, not from the tests. I started no server, changed no app source and made no commits.
+
+### Result
+
+**723 tests: 722 passed, 1 failed.** The failure is an **app bug**. I ran the full suite 3 times and got the same result each time; no test was flaky.
+
+| File | Tests | Pass |
+|---|---:|---:|
+| `phase15-tester.test.js` (new, mine) | 191 | 190 |
+| `phase15.test.js` (developer) | 47 | 47 |
+| all earlier files (smoke, location, lib, items, search, categories-racks, import, round2, round2-tester) | 485 | 485 |
+| **Total** | **723** | **722** |
+
+### What is covered (`tests/phase15-tester.test.js`)
+
+- **Auth on every write.** The writes are `POST /api/items`, `PUT` and `DELETE /api/items/:id`, `POST /api/import` as a dry run and as a real import.
+  - Each one returns 401 for 11 bad authorisation variants:
+    - no header
+    - `Bearer ` with nothing after it
+    - the `Basic` scheme
+    - a garbage token
+    - a tampered payload (expiry pushed out a year)
+    - a tampered signature
+    - a token from another install
+    - an extra `.segment`
+    - two tokens
+    - a 600-character token
+    - a token without the scheme
+  - Every 401 uses the exact message, sends `WWW-Authenticate: Bearer` and writes nothing.
+  - An expired token gets 401 with the "session expired" message.
+  - A valid token works, including with lower-case `bearer`.
+  - The 401 is returned before body validation runs.
+  - PATCH and OPTIONS also need a token.
+  - Reads, scan, the template, health and status stay public even with a garbage token.
+  - `auth/status` reports leader only for a valid, unexpired token.
+- **Login and tokens**
+  - Login returns `{token, expiresAt}` 30 days ahead. The PIN may be sent as a number.
+  - Missing, array or over-long `pin` gives 400.
+  - Malformed PINs (`123`, `abcd`, `" 2468"`) get 401 `Wrong PIN.`
+  - With a fake clock, a token still works 1 minute before 30 days and gets 401 "expired" 1 second after.
+  - Changing the PIN, through `setPin` or through the `set-pin` script running as a separate process, kills every token on the running app. The old PIN then fails and the new one works. The script never prints the PIN.
+  - `config.json` holds only the scrypt hash and salt.
+- **Rate limiting**, using the default limiter with a faked `Date` and a per-request client IP:
+  - 5 wrong tries give 429 with `Retry-After: 300` and `details.retryAfterSeconds`, even for the right PIN.
+  - Retry-After counts down (180, then 1) and the block lifts after 5 minutes.
+  - The limit is per IP: another IP can still log in, and that doesn't unblock the first.
+  - Wrong tries spread over more than 5 minutes don't block. A correct PIN resets the count.
+  - **Global cap:** 4 wrong tries each from 5 IPs (none blocked on its own) blocks a sixth, never-seen IP for 5 minutes.
+  - 400s are not counted. A valid token keeps working for writes while that IP is blocked from logging in.
+- **Setup needed and damaged config**
+  - With no config file, all 4 kinds of write and the login return 403 with the exact message, and status shows `pinSet:false`. Reads, template and scan still work.
+  - A config with a PIN but no token secret counts as "not set".
+  - Setting the PIN while the server runs ends setup mode without a restart.
+  - A damaged `config.json` (`{broken` or an empty file) gives **503 on every write, with or without a token**. Reads still work, and everything recovers after `set-pin`.
+- **Brand, model and barcode**
+  - They default to null and are part of the Item shape. Brand and model are trimmed, `""` and null clear them, and more than 100 characters gives 400.
+  - Barcode normalisation: spaces, tabs and newlines are removed, letters upper-cased, and numbers become strings.
+  - Barcodes with `-`, `.`, `é`, full-width or Arabic-Indic digits, `<x>`, or 65 characters give 400. 64 characters is accepted.
+  - Uniqueness: 409 with `details {field:"barcode", code}` on create and on update, ignoring spaces and case. An item can re-send its own barcode, clearing a barcode frees it, and many items can have no barcode.
+- **Search**
+  - An exact barcode ranks top, also when typed with spaces, ahead of a code-prefix match and a notes match.
+  - Brand, model and part of a barcode are searchable.
+  - `unlocated=true|1` returns items with no rack or an unparseable location, sorted by code. `false`, `0` and `""` return everything, and `yes`, `TRUE` and `2` give 400.
+  - `unlocated` combines with `q` (normal ranking) and with `rack`.
+- **Import**
+  - Five header sets map the new columns: `Brand/Model/Barcode`, `Jenama/No Model/Kod Bar`, `Pengeluar/Model No/EAN`, `Manufacturer/Model Number/UPC`, and `Make/MODEL/barcode`.
+  - Numeric 13- and 14-digit EAN cells in xlsx keep every digit.
+  - These invalid barcodes give a warning, the row is still imported and the barcode stays unset: `9.31235E+12` (Excel's CSV scientific notation), `ABC-123`, and 65 characters.
+  - A barcode already owned by another item, in the DB or earlier in the file, gives a warning and is not moved. Dry and real runs agree on this.
+  - Blank brand, model and barcode cells never change an existing item. Changing a barcode through import counts as an update.
+- **Migration v1 → v2.** A populated v1 file database upgrades in place:
+  - Every v1 value is unchanged and the new columns are null.
+  - `schema_version` gets a 2 while v1's `applied_at` is kept.
+  - The API works on the upgraded database: list, PUT with barcode and brand while keeping `createdAt`, and 409 for a duplicate barcode.
+  - Re-opening the database is a no-op.
+- **Scan matching**
+  - The response shape is as documented.
+  - An exact barcode, with spaces ignored, returns that item alone with score 1 even if the text points elsewhere. A barcode equal to an OCR-folded code also counts as exact. An unknown barcode alone returns `[]`; with text, text matching is used.
+  - These OCR-noisy codes all give score 1 on `code`: `TNT-OO4`, `tnt 0O4`, `tnt004`, `TNT 004`, `TNT - 0 0 4`, `TNT_O04`, and the code inside a multi-line label.
+  - These brand/model typos all match on brand and model: `Colernan Sundorne` (rn→m), `Co1eman`, `Colemam`, `Campingas Bistr0`, `Petz1 Tikina`.
+  - Results are sorted best first and capped at 10.
+  - Noise-only text returns `[]`: label boilerplate, stopwords, punctuation, `®©™`, single letters.
+  - 9 kinds of invalid body give 400. 2000 characters is accepted, and GET is a 404.
+  - **Performance:** with 5,000 items and a 2,000-character noisy text, the median of 3 runs is under 300 ms. A separate timing run gave about 50–100 ms per request.
+- **Static serving** from a temp dist:
+  - SPA fallback works for 9 client routes and with query strings. Those pages get `no-cache` and every security header, and no HSTS.
+  - `/api`, `/api/nope`, `/api/items/999` and `/api/racks/R99` return JSON 404 with `no-store`, never `index.html`.
+  - Missing `.js`, `.png` and `.wasm` files are real 404s.
+  - Cache and content types are right: assets are immutable, `.wasm` is `application/wasm`, `.mjs` is JavaScript, `.webmanifest` is the manifest type, and `favicon.svg` and `index.html` are `no-cache`.
+  - **14 path traversal and dotfile attempts** never leak a file outside dist or a dotfile, and never give 500. They include encoded `..`, `%5c` backslash, overlong UTF-8, `%00`, `//` and `/.secret`.
+  - POST to a page path gets 404 and HEAD works.
+  - `resolveStaticDir` serves only in production or with `SERVE_FRONTEND=1`, honours `FRONTEND_DIST`, and needs `index.html`.
+- **Backups** in temp dirs:
+  - Rotation keeps the N newest by date, whatever order they were created in.
+  - It **never deletes other files**: `notes.txt`, `store-latest.db`, `Store-…`, `store-2020-1-1.db`, `.bak`, `.partial`, `my-store-…`, `.sqlite` and a subfolder all survive.
+  - Each backup is a readable copy that passes `integrity_check`, and no `.partial` is left behind.
+  - An unusable folder (a file in the way, or the target name taken by a folder) gives exactly one warning, no exception, and no `.partial`.
+  - With a fake clock, `scheduleBackups` backs up now, replaces the file at 21:00 the same day and runs again the next day. A failing day only warns and the following day works. `stop()` ends the schedule.
+
+### Failure: app bug
+
+**P15-1 (low/medium): a code spelled out letter by letter is not found.** The test is "a fully letter-spaced code "T N T - 0 0 4" (6 OCR words) finds TNT-004".
+
+- **Request:** `POST /api/scan/match {"text":"T N T - 0 0 4"}`, with item `TNT-004` in the DB.
+- **Expected:** TNT-004 as the top match on `code`. You asked for this case in the round brief.
+- **Actual:** `{"matches":[]}`. `T N T 0 0 4` behaves the same way.
+
+**Cause.** `analyzeText` in `src/lib/scanMatch.js` joins at most `MAX_WINDOW = 5` neighbouring words. `T N T - 0 0 4` is 6 words, because the `-` is dropped. So a 7-character code that OCR reads as separate characters can never be rebuilt. This happens with stencilled or widely spaced labels. `TNT - 0 0 4` (4 words), the example in the spec note, does work.
+
+**Suggested fix.** Limit the window by the folded length instead of the word count. For example, keep joining words until the folded string is longer than the longest item code (up to about 20 characters).
+
+### Observations (not failing tests)
+
+1. **A damaged `config.json` makes `POST /api/auth/login` return 403 "Leader PIN not set. Run set-pin on the laptop.", and `/api/auth/status` reports `pinSet:false`.** Writes correctly return 503. A leader whose PIN *is* set would be told it isn't. The fix (run set-pin) is the same, but a 503 "settings file is damaged" on login and status would be clearer.
+2. **Leading zeros in barcodes:**
+   - A 12-digit UPC with a leading zero (`012345678905`) stored in a **numeric** Excel cell imports as `12345678905`. Scanning the real barcode then won't match exactly.
+   - A barcode sent as a JSON *number* larger than 2^53 is already rounded by the time it reaches the server.
+   - Possible fixes: compare barcodes ignoring leading zeros (GTIN-style), or warn on numeric cells shorter than 12 digits.
+3. Barcode `ß12` becomes `SS12`, because `toUpperCase` expands ß. Harmless.
+4. The SPA fallback skips any path whose last segment contains a dot (e.g. `/items/1.5` → 404). Current routes are not affected.
+5. The scan text limit is 2000 characters. A dense label can produce more OCR text than that, so the frontend should truncate before sending rather than get a 400.
+6. A one-character transposition in a brand (`Peztl` for `Petzl`) is 2 edits and is not matched. This is per the spec (≤1 edit).
