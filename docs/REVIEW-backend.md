@@ -320,3 +320,294 @@ condition and say so in the warning. Update the spec line if this is adopted.
 running server. The new import counts and the "blank never changes" rule work, and all 405 tests pass.
 The one remaining item worth doing before the app is exposed beyond trusted users is **R2-1**, a
 one-line regex change plus dropping the entry-name filter. R2-2 and R2-3 are optional.
+
+---
+
+## Phase 1.5 review (commit `599115c`)
+
+Scope: `backend/src/auth/*`, `app.js` (headers, static/SPA, write gating), `server.js`, `lib/env.js`,
+`lib/scanMatch.js`, `routes/scan.js`, migration v2, `services/backup.js`, `scripts/{set-pin,backup}.js`,
+the import and search changes, `windows/*.ps1|*.bat`, and `docs/SETUP-WINDOWS.md`.
+
+How I checked:
+- I ran the server on `PORT=3101` with a temporary `DB_PATH`, `CONFIG_PATH` and `BACKUP_DIR`, and a
+  stand-in `FRONTEND_DIST`. Afterwards I stopped it and deleted the temporary files.
+- I tried every write route without a token, with bad tokens and with a valid token, and attacked
+  login, the token, static serving and the scan endpoint.
+- I migrated a real v1 database, and benchmarked scan matching with 5,000 items and 2,000-character
+  noisy text.
+- The vitest suite passes: 10 files, 532 tests.
+- Windows items were reviewed by reading only. They are marked **(needs Windows verification)**.
+
+**Counts:** Critical 1 · Major 2 · Minor 7 · Nit 8
+
+### Critical
+
+#### P1 — Sending many login requests at once gets past the PIN rate limit; a 4-digit PIN falls in about an hour
+`backend/src/auth/index.js:165-182`, `auth/rateLimit.js:201-225`
+
+**Problem.** The login handler calls `limiter.check(ip)`, then `await verifyPin()` (scrypt, about
+40-100 ms on the thread pool), and only then `limiter.fail(ip)`. Any number of requests that arrive
+before the first wrong try is recorded all pass `check()`. The 5-per-IP and 20-global limits only
+start working once the first scrypt finishes.
+
+**Verified from one client:**
+- 200 parallel logins with PINs 4700-4899 → **132 × 401, 67 × 429, and 1 × 200: PIN 4821 found in a
+  single burst.**
+- 1,000 parallel logins → **591 PINs actually checked** (instead of 5) in 22 s.
+
+So one phone on the troop Wi-Fi can try about 600 PINs every 5 minutes. All 10,000 four-digit PINs take
+about 85 minutes (about 40 on average), and an old laptop is no protection because scrypt runs per
+request. The same bursts also keep the server's CPU and thread pool busy (backups and file I/O share
+the pool).
+
+**Fix.** Reserve the attempt *before* the `await`:
+- Count in-flight attempts per IP and globally in `check()`/`begin()`.
+- Treat `pending + recent failures >= limit` as blocked.
+- Release the reservation as a failure or a success when scrypt returns.
+
+Simplest of all: allow at most 1 login in flight per IP and about 2 globally (reply 429 to the rest).
+Add a test that fires 50 parallel wrong logins and expects at most 5 to be checked.
+
+### Major
+
+#### P2 — Any Windows user can change code that runs as SYSTEM, and can read the PIN hash and token secret (needs Windows verification)
+`windows/install.ps1:97-107`, `windows/start.bat:12-14`, `docs/SETUP-WINDOWS.md` §5, `auth/config.js:42`
+
+**Problem.** The guide puts the app in `C:\eTroop`. A folder created directly under `C:\` inherits
+**Authenticated Users: Modify** from the root of the drive. Nothing in `install.ps1` narrows this. The
+startup task then runs `start.bat` → `node.exe src\server.js` (and everything in `node_modules`) as
+**SYSTEM**.
+
+Three consequences:
+1. Any standard (non-admin) account on the laptop, such as a shared "Scouts" login, can edit
+   `windows\start.bat`, `backend\src\*.js` or `node_modules`, and that code runs as SYSTEM at the next boot.
+2. `start.bat` uses `where node.exe`, and cmd searches the **current directory** (`backend\`) before
+   PATH. A `node.exe` dropped into `C:\eTroop\backend` would be run as SYSTEM.
+3. `data\config.json` is readable by every user. `mode: 0o600` has no effect on Windows. That gives
+   them the scrypt hash (a 4-digit PIN is cracked offline in minutes) and `tokenSecret`, which lets
+   them forge leader tokens directly.
+
+**Fix.**
+- In `install.ps1`, lock the install folder down:
+  `icacls "$RepoRoot" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`.
+  Only SYSTEM and Administrators may write. Note that `npm run set-pin` then needs an admin prompt, so
+  update guide §10, or add a `set-pin.bat` that elevates.
+- In `start.bat`, use an absolute node path recorded at install time, e.g. `(Get-Command node.exe).Source`
+  written into the task arguments or an env var. Never rely on a bare `node.exe` from the current
+  directory.
+- Alternatively, run the task as `LOCAL SERVICE` with write access to `backend\data` only.
+
+#### P3 — Scan matching gives short or numeric item codes a perfect score from unrelated label text
+`backend/src/lib/scanMatch.js:27-35, 86-98, 130-134`
+
+**Problem.** Codes are compared after OCR folding (`O→0, I/L→1, S→5, B→8, Z→2`), against joins of up to
+5 neighbouring words, with only a `length >= 3` guard. A code match adds weight 1, so it beats any real
+brand+model+name match. Ties are broken by code.
+
+**Verified:**
+- For the label text `"Coleman dome tent / AC 220-240V 50Hz / Made in China 2024 / TNT - 0 O 4"`, items
+  with codes **`2024` and `220` score 1.0 and rank above `TNT-004`** (also 1.0).
+- `"Do not B O I L water"` gives code `BOIL` a score of 1.
+- With numeric codes, everyday words fold into them: `OIL`→`011`, `SOS`→`505`, `ZOO`→`200`.
+
+The quartermaster's real file has "item code" with an unknown format. Short or numeric codes such as
+`001` or `102` are common in troop inventories, and the scan screen would then show the wrong item first.
+
+**Fix.**
+- Only count a code match when the folded code has at least 4 characters **and** contains at least one
+  character that was a letter in the original code. Or, for all-digit codes, require that the matching
+  window comes from a single OCR word.
+- Give all-digit codes a lower weight (e.g. 0.4).
+- Break ties by the number of other fields matched, not by code.
+
+Check this against the real code format when the file arrives.
+
+### Minor
+
+#### P4 — A damaged or empty `config.json` cannot be repaired with the tool the error message names
+`backend/src/auth/config.js:26-36, 70-77`, `auth/index.js:150, 173`
+
+Writes return 503 "Leader settings file is damaged. **Run set-pin** on the laptop." But `setPin()` calls
+`readConfig()` first, and that throws. Verified: `set-pin --pin 1111` on `{bad` or on a 0-byte file
+exits with code 1 and prints a JSON error. `writeConfig` doesn't `fsync` before the rename, so a power
+cut on an old laptop can leave exactly that 0-byte file. In this state, `/auth/login` answers 403 "PIN
+not set" and `/auth/status` says `pinSet:false`, which contradicts the 503. Each write also logs a full
+stack trace, because 503 ≥ 500.
+
+**Fix.**
+- In `setPin`, treat an unreadable config as `{}`, after renaming the bad file to `config.json.broken`.
+- `fsync` the temporary file before the rename.
+- Give login and status the same "damaged" message.
+- Don't log stacks for `HttpError` 503.
+
+#### P5 — Anyone on the Wi-Fi can lock every leader out indefinitely (global cap)
+`backend/src/auth/rateLimit.js:216-220`
+
+20 wrong PINs from anywhere block **all** logins for 5 minutes. A scout's phone sending 20 wrong PINs
+every 5 minutes keeps the leaders out for good. This follows the spec, but now that P1 shows the
+per-IP limit is what really matters, consider:
+- Exempting `127.0.0.1`/`::1` (the laptop itself) from the global block.
+- Not counting IPs that have logged in successfully in the last 30 days.
+- Lowering the global block to 1 minute.
+
+Either way, tell the guide's troubleshooting section that login works on the laptop at
+`http://localhost:3001`.
+
+#### P6 — `update.ps1`, the restore procedure and "start again" all need a full reinstall, and a failed update leaves the app stopped (needs Windows verification)
+`windows/update.ps1:27`, `windows/stop.ps1:8`, `docs/SETUP-WINDOWS.md` §11 step 4 and §13
+
+- If `Install-AppDependencies` fails after a successful `git pull` (no internet, or the better-sqlite3
+  prebuilt download is blocked), `Stop-WithError` exits with the task **stopped**, and
+  `node_modules` was already deleted by `npm ci`. The message "Nothing else was changed after this
+  step" is wrong here.
+- To start the app after `stop.bat`, or after a restore, the guide says to run `install.bat`. That
+  re-runs `npm ci` and the build, which needs internet and 5-15 minutes.
+
+**Fix.**
+- Add `start.ps1`/`start.bat` (`Start-ScheduledTask` + `Wait-ForServer`), and use it in the guide.
+- In `update.ps1`, wrap the install step so that on failure it says clearly that the app is stopped and
+  how to retry. Alternatively, run `npm ci` into a staging copy before stopping the app.
+
+#### P7 — Scan endpoint: about 120 ms of blocking work per request, public and unthrottled
+`backend/src/routes/scan.js:305-310`, `lib/scanMatch.js`
+
+Each request runs `SELECT *` on every item and builds the Item objects, then re-tokenises every
+item's fields. **Measured:** 5,000 items with 2,000-character text took 108-137 ms per request, with the
+event loop blocked for that time, and 20 parallel requests took 1.3 s. An old laptop will be several
+times slower.
+
+This is fine for a few phones. But it's public, so one misbehaving client loop can keep the server
+busy, and it grows linearly with the number of items.
+
+**Fix.** Cache the item list and each item's pre-tokenised and folded fields, and invalidate the cache
+on any write (a version counter bumped in create/update/delete/import). Optionally add a simple
+per-IP limit of a few requests per second.
+
+#### P8 — The startup task finds node through the PATH of SYSTEM (needs Windows verification)
+`windows/start.bat:12-14`, `install.ps1:13-21`
+
+`install.ps1` checks `node.exe` in the *admin user's* PATH, but the task runs as SYSTEM, which only
+sees the machine PATH, falling back to `%ProgramFiles%\nodejs`. If Node was installed per user (nvm-windows,
+fnm, winget user scope or a portable zip), the install succeeds but `start.bat` loops every 10 s,
+logging "not recognized", and phones can't connect.
+
+**Fix.** Save `(Get-Command node.exe).Source` at install time. Refuse paths under `C:\Users\` with a
+clear message, and pass the path to `start.bat`. This also fixes part of P2.
+
+#### P9 — Dry run and real import can disagree on a barcode moved between items
+`backend/src/services/importer.js` (`barcodeOwner` / `getItemByBarcode`)
+
+Take a file where row 3 changes item A's barcode from X to Y, and row 5 gives X to item B. In the real
+import, A has already been updated inside the transaction, so B gets X. In the dry run, the database
+still says A owns X, so B gets a "barcode not changed" warning. The preview then doesn't match what the
+real import does.
+
+**Fix.** In the dry run, keep the in-file view: record "A released X" in `barcodeOwner` when a row
+changes A's barcode, and check that map before the database.
+
+#### P10 — Firewall rule allows any remote address (needs Windows verification)
+`windows/install.ps1:74-75`
+
+The rule is limited to the Private profile, which is good, but has no `-RemoteAddress`. Adding
+`-RemoteAddress LocalSubnet` keeps the app reachable only from the troop Wi-Fi subnet, even if a
+VPN or USB tethering connection is also classed as Private.
+
+A related point for the guide's troubleshooting section: if anyone ran `npm start` by hand and clicked
+**Cancel** on the "Windows Security Alert" for node.exe, Windows creates **Block** rules for node.exe.
+Block wins over our Allow rule. Add "Windows Defender Firewall → Allow an app → remove/allow Node.js
+JavaScript Runtime" to the troubleshooting.
+
+### Nit
+
+- **N1** `npm run set-pin -- --pin 1234` shows the PIN on screen, because npm echoes
+  `> node scripts/set-pin.js --pin 1234` (verified). It also ends up in shell history. `install.ps1`
+  doesn't use `--pin` (good). Mention this in the `--help` text, or accept the PIN from stdin instead.
+- **N2** Token signatures are decoded with the lenient `Buffer.from(sig, 'base64url')`, so `token + "!"`
+  is still accepted (verified 204). This is not a forgery, but compare the canonical form: re-encode
+  `got` and require it to equal `sig`.
+- **N3** `loginSchema` accepts `pin` as a JSON number, so `0123` can never work and `123` counts as a
+  wrong try. Accept strings only.
+- **N4** `server.log` is only rotated when the server (re)starts (`start.bat:25-31`). A server that runs
+  for months never rotates. Output is small today, so this is low risk.
+- **N5** A missing static file (`/assets/missing.js`, `/favicon.ico`) returns Express's default HTML
+  404 page. This leaks nothing, but a short plain-text 404 would be tidier.
+- **N6** `createItem`/`updateItem` race → `SQLITE_CONSTRAINT_UNIQUE` maps to a generic "Duplicate item
+  code or barcode" without `details.field`, unlike the checked path.
+- **N7** `HOST` now defaults to `0.0.0.0` for `npm run dev` too, so a developer's laptop serves the API
+  to its whole network. Consider `0.0.0.0` only when `NODE_ENV=production`.
+- **N8** Guide: mention that the Google Drive copy only syncs while someone is logged in to the laptop.
+  The `$RepoRoot` path goes through `Resolve-Path`, which treats `[ ]` as wildcards; this is fine for
+  the recommended `C:\eTroop`.
+
+### Verified as correct (no action)
+
+**Write protection**
+- Every write needs the token, and I tried them all. Without a token, these return **401**:
+  - `POST /items`, `POST /items/`, `PUT /items/1`, `DELETE /items/1`, `DELETE /items/1/`,
+    `PATCH /items/1`, `OPTIONS /items`, `DELETE /items`
+  - `POST /ITEMS` and `POST //items`
+  - `POST /import?dryRun=true` (with a file) and `POST /import` (empty)
+- Auth runs **before** multer, so unauthenticated uploads are never parsed.
+- With a valid token, writes succeed. `bearer` is case-insensitive.
+- Public endpoints work without a token: GET/HEAD items, template download, `/scan/match`,
+  `/auth/status`.
+
+**Tokens and PIN**
+- HMAC-SHA256 with a 32-byte random secret, compared with `timingSafeEqual` after a length check.
+  An edited payload (`exp` changed) → 401. Expired tokens → 401 with the expired message.
+- The secret rotates on `set-pin`, and the running server notices via the stat stamp.
+- scrypt N=2^15, r=8, p=1, 16-byte salt and a 32-byte key are appropriate. `verifyPin` is async and
+  uses a constant-time compare.
+- `config.json` is written atomically with mode 0600 on POSIX. The PIN never appears in server logs.
+
+**Rate limiting (sequential requests)**
+- 5 wrong tries → 429 with `Retry-After: 300` and `details.retryAfterSeconds`. The right PIN also gets
+  429 while blocked.
+- **`X-Forwarded-For` is ignored** (`trust proxy` is off), so spoofing XFF gets no extra tries.
+
+**Static serving and headers**
+- No traversal: `/../config.json`, `%2e%2e`, `..%2f`, `..%5c` → 404.
+- Dotfiles are never served: `/.env` and `/.git/config` → the SPA `index.html`.
+- `/api`, `/api/` and `/api/nope` → JSON 404, never `index.html`. `/assets/missing.js` → 404.
+- `.wasm` is served as `application/wasm`. `assets/*` is immutable-cached, other pages are `no-cache`,
+  and the API is `no-store`.
+- The CSP and other security headers are on every response, as documented. No CSRF exposure: the token
+  is a header, not a cookie.
+
+**Migration v2**
+- On a real v1 file database, v2 applies once and the version is recorded. Existing rows get
+  null brand/model/barcode. `unlocated` works. The unique barcode index gives 409. Reopening is a no-op.
+
+**Backups**
+- `.partial` file then rename. Rotation deleted only `store-YYYY-MM-DD.db` files:
+  `notes.txt`, `store-backup.db` and `store-2020-01-01.db.bak` were kept.
+- `BACKUP_DIR` set to the data folder itself is safe: `store.db` and its `-wal`/`-shm` files are untouched.
+- `BACKUP_DIR` pointing at a file, or below one → warning, and the server keeps running.
+  Out-of-range `BACKUP_KEEP`/`BACKUP_HOUR` fall back to the defaults.
+
+**Scan matching**
+- OCR folding and joining split words work as specified: `TNT - 0 O 4` → `TNT-004`.
+
+**Windows scripts (by reading)**
+- PowerShell 5.1 syntax only (no `??`, ternaries or PS 7 cmdlets), plain ASCII with CRLF
+  (`.gitattributes`).
+- `-LiteralPath` is used throughout, and the scheduled-task argument quoting `/c ""…start.bat""` is
+  correct for paths with spaces.
+- Task, firewall rule and `.env` handling are idempotent (remove + recreate). The firewall rule is
+  Private-only.
+- powercfg only changes AC settings. Self-elevation handles a "No" at the UAC prompt.
+
+**Guide**
+- The guide is clear and in the right order for a non-technical leader. It covers 64-bit, the
+  Private network, DHCP reservation, guest Wi-Fi, "Not secure", Add to Home screen and restore.
+
+### Phase 1.5 verdict
+**Changes required before deployment: P1 (Critical) and P2 (Major).**
+- **P1** is a few lines in the login path, and its test is easy.
+- **P2** is an `icacls` call plus an absolute node path in `start.bat`, which also covers P8. It needs a
+  check on a real Windows 10 machine.
+- **P3** should be decided when the real item-code format is known.
+
+Everything else is solid: token design, write gating, static serving, headers, migration and backup
+rotation all held up under direct testing.
