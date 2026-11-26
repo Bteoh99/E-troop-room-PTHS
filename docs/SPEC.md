@@ -107,3 +107,56 @@ Condition colors: good=green, needs_repair=amber, damaged=red, written_off=grey,
 
 ## Out of scope for Phase 1 (do not build yet)
 Check-in/out log, members, login/roles, maintenance log, QR codes, stocktake. Keep code structured so these can be added (Phase 2 = check-out/check-in).
+
+---
+
+# Phase 1.5 — Laptop hosting, Leader PIN, Scan, Locations
+
+Decisions from the quartermaster:
+- The app runs on an **old Windows 10 laptop** on the troop Wi-Fi; others open it from Android phones (Chrome) on the same Wi-Fi via `http://<laptop-ip>:3001`. Plain HTTP on the LAN (no HTTPS), so **no live camera stream / getUserMedia**.
+- **Leader PIN**: anyone may search and view; adding, editing, deleting and importing need the PIN.
+- **Scan**: scan the item's **own manufacturer label** (brand/model text) or a **shop barcode** — no printed labels.
+- The real Excel has only **item name, item code, quantity** (no locations) → items will arrive unlocated and need fast location entry.
+
+## A. Item fields (backend migration v2)
+Add to Item: `brand` (string|null, ≤100), `model` (string|null, ≤100), `barcode` (string|null, ≤64, digits/letters only after trimming spaces; unique when not null → 409 on duplicate).
+- Search `q` also matches brand, model, barcode. Exact barcode match ranks with exact code match (top tier).
+- Excel aliases: brand: `brand`, `jenama`, `manufacturer`, `make`, `pengeluar`; model: `model`, `model no`, `model number`, `no model`; barcode: `barcode`, `kod bar`, `ean`, `upc`. (`description` stays a name/notes alias as before.)
+- `GET /api/items?unlocated=true` → only items with `rack` null (both no location and unparseable location); sorted by code.
+
+## B. Scan matching — `POST /api/scan/match`
+Body: `{ "text"?: string (≤2000), "barcode"?: string (≤64) }` (at least one). Public (no PIN).
+Response: `{ "matches": [{ "item": Item, "score": number (0..1), "matchedOn": string[] }], "query": { "tokens": string[], "barcode"?: string } }`, max 10, best first.
+- `barcode` present and an item has that exact barcode → that item alone with score 1.
+- `text` is raw OCR output (noisy, multi-line). Tokenise (letters/digits, drop tokens < 2 chars and common noise words like "made", "in", "the", "warning", "kg", "cm"). Score items by weighted token overlap against code (highest weight), barcode, brand, model, name, category, notes. Code matching must be OCR-tolerant: compare after mapping O→0, I/L→1, S→5, B→8, Z→2 on both sides and ignoring `-`/spaces/`_`, so `TNT-OO4`, `TNT 004`, `tnt004` all find `TNT-004`. Use a small edit-distance tolerance (≤1) for tokens ≥5 chars on brand/model.
+- No sensible match → `matches: []` (200).
+Pure scoring logic in its own module (unit-testable).
+
+## C. Leader PIN (backend)
+- PIN is 4–8 digits, stored only as a **scrypt hash + salt** in `data/config.json` (gitignored), never in code or logs. Set/change with `npm run set-pin` (prompts twice, hidden input; also accepts `--pin` for scripts). If no PIN is set, the server starts in **setup-needed** mode: writes return 403 `{error:{message:"Leader PIN not set. Run set-pin on the laptop."}}`.
+- `POST /api/auth/login {pin}` → `{ token, expiresAt }`. Token = HMAC-SHA256-signed (secret random per install, stored in config.json) with 30-day expiry. Wrong PIN → 401. **Rate limit**: 5 wrong attempts per IP → 429 for 5 minutes (also a global cap of 20 wrong/5 min). Constant-time compare.
+- `GET /api/auth/status` → `{ pinSet: bool, leader: bool }` (leader = valid token sent).
+- Writes (`POST/PUT/DELETE /api/items*`, `POST /api/import` incl. dry run) require `Authorization: Bearer <token>`; missing/invalid/expired → 401. Reads, `/api/scan/match`, template download stay public.
+- Changing the PIN (set-pin) rotates the secret → all existing tokens invalid.
+- Tests: helper to set a known PIN in a temp config dir (`CONFIG_PATH` env, default `data/config.json`).
+
+## D. Laptop mode (single server)
+- In production the backend also serves `frontend/dist` (static, with SPA fallback to index.html for non-`/api` GETs) when that folder exists. Listen on `0.0.0.0`. On start, print the LAN URLs (e.g. `Open on phones: http://192.168.1.50:3001`).
+- Security headers suitable for a LAN app (no external CDNs needed; everything self-hosted).
+- **Automatic backup**: on start and then daily at `BACKUP_HOUR` (default 21), use better-sqlite3's online `db.backup()` into `BACKUP_DIR` (default `backend/data/backups`, can point at a Google Drive for desktop folder or USB) as `store-YYYY-MM-DD.db`; keep the newest `BACKUP_KEEP` (default 30). Never crash the server if the backup folder is missing/unwritable — log a warning. `npm run backup` does one now.
+- Config via `backend/.env` (gitignored) read at start (PORT, BACKUP_DIR, BACKUP_HOUR, BACKUP_KEEP); `.env.example` committed.
+
+## E. Windows 10 scripts — `windows/` folder (repo root)
+Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. PowerShell 5.1 compatible (built into Windows 10 — no PowerShell 7 features).
+- `install.ps1` (run once as Administrator): check Node ≥22 x64 & npm; `npm ci` backend + frontend; build frontend; run set-pin if no PIN; add Windows Firewall inbound rule for TCP 3001 on **Private** profile only; register a **Task Scheduler** task "e-Troop Store Room" that runs at system startup (whether or not anyone logs in, restart on failure, no time limit) launching `start.bat`; offer to set power plan so the laptop never sleeps while plugged in (`powercfg`); print the LAN URL. Idempotent (safe to run again).
+- `start.bat`: starts the server with `NODE_ENV=production`, appending output to `backend/data/logs/server.log` (rotate when > 5 MB).
+- `update.ps1`: stop task → `git pull` → `npm ci` both → build → start task.
+- `stop.ps1`, `uninstall.ps1` (removes task + firewall rule, **keeps data**), `backup-now.bat`.
+- `windows/README.md` is not needed — the guide is `docs/SETUP-WINDOWS.md` (plain English, step by step, written for a non-technical leader: install Node & Git, download repo, run install, set Wi-Fi to Private network, give the laptop a fixed IP / router reservation, open on Android + Add to Home screen, where backups are, how to update, troubleshooting).
+
+## F. Frontend
+1. **Leader mode**: a lock button in the header/tab bar (🔒 "Leader" / 🔓 "Leader mode on"). Unlock dialog with numeric PIN input (`inputmode="numeric"`, `autocomplete="off"`). Token kept in localStorage (wrapped in try/catch). Add/Edit/Delete/Import controls are visible but, when locked, tapping them opens the PIN dialog first, then continues. Any 401 → token cleared, PIN dialog shown, action retried after unlock. 429 → "Too many wrong tries — wait 5 minutes". Setup-needed (403) → explain the PIN must be set on the laptop. "Lock" button to leave leader mode.
+2. **Scan** (new tab "Scan", also a 📷 button beside the search box): `<input type="file" accept="image/*" capture="environment">` (works over plain HTTP). Flow: take photo → show the photo thumbnail + progress ("Looking for a barcode…", "Reading text…") → first try barcode decoding on the photo (e.g. zxing-wasm / @zxing/library, bundled locally), then OCR with **tesseract.js running fully offline**: worker, core wasm and the English traineddata must be **bundled/served from our own server** (copied into the build from npm packages, e.g. `@tesseract.js-data/eng` or `tesseract.js-core`), never fetched from a CDN at runtime. Downscale/greyscale the image before OCR (max ~1600 px) for speed on old phones. Then call `/api/scan/match` and show results as normal result cards (big 📍 badge) with "Matched on: brand, model". Show the recognised text (editable) with a "Search with this text" button, so the user can fix OCR mistakes. No match → friendly message + buttons "Try another photo" and "Type to search". Lazy-load the scan code so the main app stays fast. Tips shown on the screen: good light, fill the frame with the label, hold steady.
+3. **Needs a location** page (`/locate`, linked from the Map page "X items have no location" and from a dashboard-style badge on Search when > 0): list unlocated items (code, name, qty) each with an inline location input + live normalized preview + Save (needs leader mode). After saving, the row slides away and focus jumps to the next item's input, so a leader can walk along racks entering locations quickly. Optional "Rack prefix" helper: choose rack R03 once, then type just `B-2`.
+4. Item form/detail/search cards show brand, model, barcode when present. Form fields for them.
+5. Import preview shows brand/model/barcode columns when present.
