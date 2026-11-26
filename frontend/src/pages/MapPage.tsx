@@ -28,6 +28,11 @@ export function MapPage() {
                 {racks.data.unlocated} item{racks.data.unlocated === 1 ? ' has' : 's have'} no rack location yet.
               </p>
             )}
+            {racks.data.unlocated > 0 && (
+              <Link to="/locate" className="btn btn--secondary">
+                Give items a location
+              </Link>
+            )}
             <Link to="/items/new" className="btn btn--primary">
               Add an item
             </Link>
@@ -39,7 +44,10 @@ export function MapPage() {
               <p className="note">
                 <span aria-hidden="true">ℹ️ </span>
                 {racks.data.unlocated} item{racks.data.unlocated === 1 ? ' has' : 's have'} no rack location yet, so{' '}
-                {racks.data.unlocated === 1 ? 'it is' : 'they are'} not on the map.
+                {racks.data.unlocated === 1 ? 'it is' : 'they are'} not on the map.{' '}
+                <Link to="/locate" className="text-link">
+                  Give {racks.data.unlocated === 1 ? 'it' : 'them'} a location →
+                </Link>
               </p>
             )}
           </>

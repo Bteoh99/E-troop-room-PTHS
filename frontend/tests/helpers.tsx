@@ -3,6 +3,7 @@ import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { AppRoutes, routerFuture } from '../src/App';
 import type { Item } from '../src/api/types';
 import { parseLocation } from '../src/lib/location';
+import { TOKEN_STORAGE_KEY } from '../src/lib/auth';
 
 let nextId = 100;
 
@@ -49,7 +50,22 @@ export function browserBack(): void {
 }
 
 /** Render the whole app (routes + layout) at `path` (or a history stack). */
-export function renderApp(path: string | string[], initialIndex?: number) {
+/** Puts the app in leader mode (PIN already entered) — the default for renderApp. */
+export function enterLeaderMode(token = 'test-leader-token'): void {
+  window.localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token }));
+}
+
+export function leaveLeaderMode(): void {
+  window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+}
+
+/**
+ * Render the whole app (routes + layout) at `path` (or a history stack).
+ * Phase 1.5: write actions need leader mode, so tests start unlocked-for-writes unless `{ leader: false }`.
+ */
+export function renderApp(path: string | string[], initialIndex?: number, opts: { leader?: boolean } = {}) {
+  if (opts.leader === false) leaveLeaderMode();
+  else enterLeaderMode();
   const entries = Array.isArray(path) ? path : [path];
   return render(
     <MemoryRouter initialEntries={entries} initialIndex={initialIndex ?? entries.length - 1} future={routerFuture}>

@@ -1,5 +1,10 @@
+import { getToken } from '../lib/auth';
 import type {
   ApiErrorBody,
+  AuthStatus,
+  LoginResult,
+  ScanMatchRequest,
+  ScanMatchResponse,
   CategoryCount,
   ImportResult,
   Item,
@@ -30,6 +35,12 @@ function isApiErrorBody(value: unknown): value is ApiErrorBody {
   return typeof err === 'object' && err !== null && typeof (err as { message?: unknown }).message === 'string';
 }
 
+/** Leader token (if any) — required by the server for writes, harmless on reads. */
+function authHeader(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
@@ -38,6 +49,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       headers: {
         Accept: 'application/json',
         ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+        ...authHeader(),
         ...init.headers,
       },
     });
@@ -127,6 +139,24 @@ export const api = {
   },
 
   templateUrl: `${BASE}/import/template`,
+
+  /** Items that have no rack (no location, or one that isn't a rack coordinate), sorted by code. */
+  async listUnlocated(signal?: AbortSignal): Promise<Item[]> {
+    const data = await request<{ items: Item[] }>('/items?unlocated=true', { signal });
+    return data.items;
+  },
+
+  authStatus(signal?: AbortSignal): Promise<AuthStatus> {
+    return request('/auth/status', { signal });
+  },
+
+  login(pin: string): Promise<LoginResult> {
+    return request('/auth/login', { method: 'POST', body: JSON.stringify({ pin }) });
+  },
+
+  scanMatch(body: ScanMatchRequest, signal?: AbortSignal): Promise<ScanMatchResponse> {
+    return request('/scan/match', { method: 'POST', body: JSON.stringify(body), signal });
+  },
 };
 
 export type Api = typeof api;

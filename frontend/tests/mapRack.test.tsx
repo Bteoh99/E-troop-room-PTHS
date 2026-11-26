@@ -136,7 +136,14 @@ describe('Layout & navigation', () => {
     renderApp('/import');
     expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveAttribute('href', '#main');
     const nav = screen.getByRole('navigation', { name: 'Main' });
-    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual(['Search', 'Map', 'Add', 'Import']);
+    // Phase 1.5 (SPEC F.2): a "Scan" tab was added after Search.
+    expect(within(nav).getAllByRole('link').map((l) => l.textContent)).toEqual([
+      'Search',
+      'Scan',
+      'Map',
+      'Add',
+      'Import',
+    ]);
     expect(within(nav).getByRole('link', { name: 'Import' })).toHaveAttribute('aria-current', 'page');
     expect(within(nav).getByRole('link', { name: 'Search' })).not.toHaveAttribute('aria-current');
   });

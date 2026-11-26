@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { ItemCard } from '../components/ItemCard';
-import { SearchIcon } from '../components/Icons';
+import { CameraIcon, SearchIcon } from '../components/Icons';
 import { PageHeading } from '../components/PageHeading';
 import { EmptyState, ErrorState, Loading } from '../components/StatusViews';
 import { useAsync } from '../hooks/useAsync';
@@ -64,6 +64,8 @@ export function SearchPage() {
     [query, category],
   );
   const categories = useAsync((signal) => api.listCategories(signal), []);
+  const racks = useAsync((signal) => api.listRacks(signal), []);
+  const unlocated = racks.status === 'success' && racks.data ? (racks.data.unlocated ?? 0) : 0;
 
   function setCategory(value: string) {
     const next = new URLSearchParams(params);
@@ -99,6 +101,9 @@ export function SearchPage() {
             spellCheck={false}
             enterKeyHint="search"
           />
+          <Link to="/scan" className="search__scan" aria-label="Scan a label or barcode with the camera" title="Scan">
+            <CameraIcon />
+          </Link>
         </div>
         <div className="search__filters">
           <label htmlFor={catId}>Category</label>
@@ -119,6 +124,15 @@ export function SearchPage() {
           </select>
         </div>
       </form>
+
+      {unlocated > 0 && (
+        <Link to="/locate" className="todo-badge" data-testid="unlocated-badge">
+          <span className="todo-badge__count">{unlocated}</span>{' '}
+          <span>
+            item{unlocated === 1 ? ' needs' : 's need'} a location <span aria-hidden="true">→</span>
+          </span>
+        </Link>
+      )}
 
       <p className="visually-hidden" role="status" aria-live="polite">
         {results.status === 'success'

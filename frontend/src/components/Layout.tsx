@@ -1,14 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type SVGProps } from 'react';
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useLeader } from '../leader/LeaderContext';
 import { takeFlash } from '../lib/flash';
 import { focusIsFree, isRouteFocusPending, markRouteChange, setAnnouncer } from '../lib/routeFocus';
-import { MapIcon, PlusIcon, SearchIcon, TentIcon, UploadIcon } from './Icons';
+import { CameraIcon, MapIcon, PlusIcon, SearchIcon, TentIcon, UploadIcon } from './Icons';
 
 interface NavEntry {
   to: string;
   label: string;
   Icon: ComponentType<SVGProps<SVGSVGElement>>;
   isActive: (path: string) => boolean;
+  /** Needs leader mode: when locked, tapping asks for the PIN first, then continues. */
+  leaderOnly?: boolean;
 }
 
 const NAV: NavEntry[] = [
@@ -18,13 +21,21 @@ const NAV: NavEntry[] = [
     Icon: SearchIcon,
     isActive: (p) => p === '/' || (/^\/items\/[^/]+(\/edit)?$/.test(p) && p !== '/items/new'),
   },
-  { to: '/map', label: 'Map', Icon: MapIcon, isActive: (p) => p.startsWith('/map') || p.startsWith('/racks') },
-  { to: '/items/new', label: 'Add', Icon: PlusIcon, isActive: (p) => p === '/items/new' },
-  { to: '/import', label: 'Import', Icon: UploadIcon, isActive: (p) => p.startsWith('/import') },
+  { to: '/scan', label: 'Scan', Icon: CameraIcon, isActive: (p) => p.startsWith('/scan') },
+  {
+    to: '/map',
+    label: 'Map',
+    Icon: MapIcon,
+    isActive: (p) => p.startsWith('/map') || p.startsWith('/racks') || p.startsWith('/locate'),
+  },
+  { to: '/items/new', label: 'Add', Icon: PlusIcon, isActive: (p) => p === '/items/new', leaderOnly: true },
+  { to: '/import', label: 'Import', Icon: UploadIcon, isActive: (p) => p.startsWith('/import'), leaderOnly: true },
 ];
 
 export function Layout() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { leader, requireLeader, unlock, lock } = useLeader();
   const [flash, setFlash] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const mainRef = useRef<HTMLElement>(null);
@@ -77,7 +88,7 @@ export function Layout() {
           </Link>
           <nav className="tabbar" aria-label="Main">
             <ul>
-              {NAV.map(({ to, label, Icon, isActive }) => {
+              {NAV.map(({ to, label, Icon, isActive, leaderOnly }) => {
                 const active = isActive(location.pathname);
                 return (
                   <li key={to}>
@@ -85,6 +96,14 @@ export function Layout() {
                       to={to}
                       className={`tabbar__link${active ? ' is-active' : ''}`}
                       aria-current={active ? 'page' : undefined}
+                      onClick={
+                        leaderOnly && !leader
+                          ? (e) => {
+                              e.preventDefault();
+                              void requireLeader().then((ok) => ok && navigate(to));
+                            }
+                          : undefined
+                      }
                     >
                       <Icon className="tabbar__icon" />
                       <span>{label}</span>
@@ -94,6 +113,16 @@ export function Layout() {
               })}
             </ul>
           </nav>
+          <button
+            type="button"
+            className={`leader-btn${leader ? ' is-on' : ''}`}
+            onClick={leader ? lock : unlock}
+            aria-label={leader ? 'Leader mode on. Lock' : 'Leader mode off. Unlock with PIN'}
+            data-testid="leader-button"
+          >
+            <span aria-hidden="true">{leader ? '🔓' : '🔒'}</span>
+            <span className="leader-btn__text">{leader ? 'Leader on · Lock' : 'Leader'}</span>
+          </button>
         </div>
       </header>
 

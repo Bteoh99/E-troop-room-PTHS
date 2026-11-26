@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { PageHeading } from '../components/PageHeading';
+import { isLeaderCancelled, useLeader } from '../leader/LeaderContext';
 import { showFlash } from '../lib/flash';
 import { isRootEntry } from '../lib/history';
 import type { Item } from '../api/types';
@@ -46,17 +47,29 @@ function ItemDetail({ item }: { item: Item }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { leader, requireLeader, runAsLeader } = useLeader();
+
+  /** Edit/Delete are always visible; when locked they ask for the PIN first, then continue. */
+  function gated(action: () => void) {
+    return (e: React.MouseEvent) => {
+      if (leader) return action();
+      e.preventDefault();
+      void requireLeader().then((ok) => ok && action());
+    };
+  }
+  const goEdit = () => navigate(`/items/${item.id}/edit`);
 
   async function handleDelete() {
     setDeleting(true);
     setDeleteError(null);
     try {
-      await api.deleteItem(item.id);
+      await runAsLeader(() => api.deleteItem(item.id));
       showFlash(`Deleted “${item.name}” (${item.code}).`);
       // Replace: the deleted item's page must not stay in history (Back would show "not found").
       navigate('/', { replace: true });
     } catch (err) {
       setDeleting(false);
+      if (isLeaderCancelled(err)) return; // keep the confirm dialog open
       setConfirmOpen(false);
       setDeleteError(err instanceof Error ? err.message : 'Could not delete the item.');
     }
@@ -144,6 +157,24 @@ function ItemDetail({ item }: { item: Item }) {
               <dt>Location</dt>
               <dd>{item.locationCode || <span className="muted">Not set</span>}</dd>
             </div>
+            {item.brand && (
+              <div>
+                <dt>Brand</dt>
+                <dd>{item.brand}</dd>
+              </div>
+            )}
+            {item.model && (
+              <div>
+                <dt>Model</dt>
+                <dd>{item.model}</dd>
+              </div>
+            )}
+            {item.barcode && (
+              <div>
+                <dt>Barcode</dt>
+                <dd className="code">{item.barcode}</dd>
+              </div>
+            )}
             <div className="facts__wide">
               <dt>Notes</dt>
               <dd className="pre-wrap">{item.notes || <span className="muted">No notes</span>}</dd>
@@ -154,10 +185,17 @@ function ItemDetail({ item }: { item: Item }) {
             </div>
           </dl>
           <div className="btn-row">
-            <Link to={`/items/${item.id}/edit`} className="btn btn--primary">
-              Edit item
+            <Link
+              to={`/items/${item.id}/edit`}
+              className="btn btn--primary"
+              onClick={(e) => {
+                if (!leader) gated(goEdit)(e);
+              }}
+            >
+              {!leader && <span aria-hidden="true">🔒 </span>}Edit item
             </Link>
-            <button type="button" className="btn btn--danger-outline" onClick={() => setConfirmOpen(true)}>
+            <button type="button" className="btn btn--danger-outline" onClick={gated(() => setConfirmOpen(true))}>
+              {!leader && <span aria-hidden="true">🔒 </span>}
               Delete
             </button>
           </div>

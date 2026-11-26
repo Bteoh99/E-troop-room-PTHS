@@ -15,6 +15,11 @@ export function createApiMock() {
     listRacks: vi.fn(),
     getRack: vi.fn(),
     importFile: vi.fn(),
+    // Phase 1.5
+    listUnlocated: vi.fn(),
+    authStatus: vi.fn(),
+    login: vi.fn(),
+    scanMatch: vi.fn(),
     templateUrl: '/api/import/template',
   };
 }
@@ -29,4 +34,9 @@ export function installApiDefaults(api: Api): void {
   m.listRacks.mockResolvedValue({ racks: [], unlocated: 0 });
   m.getRack.mockResolvedValue({ rack: 'R01', shelves: [], unshelved: [] });
   m.deleteItem.mockResolvedValue(undefined);
+  // Phase 1.5: a PIN is set and the stored test token is valid.
+  m.listUnlocated.mockResolvedValue([]);
+  m.authStatus.mockResolvedValue({ pinSet: true, leader: true });
+  m.login.mockResolvedValue({ token: 'test-leader-token', expiresAt: '2099-01-01T00:00:00.000Z' });
+  m.scanMatch.mockResolvedValue({ matches: [], query: { tokens: [] } });
 }

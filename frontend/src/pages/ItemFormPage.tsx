@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, Loading, isNotFound, notFoundError } from '../c
 import { useAsync } from '../hooks/useAsync';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { CONDITION_LABELS } from '../lib/conditions';
+import { isLeaderCancelled, useLeader } from '../leader/LeaderContext';
 import { showFlash } from '../lib/flash';
 import { isRootEntry, replaceState } from '../lib/history';
 import { describeLocation, parseLocation } from '../lib/location';
@@ -22,6 +23,10 @@ export interface FormValues {
   unit: string;
   condition: Condition;
   notes: string;
+  /** Phase 1.5 (optional so callers/tests without them stay valid). */
+  brand?: string;
+  model?: string;
+  barcode?: string;
 }
 
 type FieldName = keyof FormValues;
@@ -36,6 +41,9 @@ const EMPTY: FormValues = {
   unit: 'pcs',
   condition: 'good',
   notes: '',
+  brand: '',
+  model: '',
+  barcode: '',
 };
 
 function fromItem(item: Item): FormValues {
@@ -48,6 +56,9 @@ function fromItem(item: Item): FormValues {
     unit: item.unit,
     condition: item.condition,
     notes: item.notes ?? '',
+    brand: item.brand ?? '',
+    model: item.model ?? '',
+    barcode: item.barcode ?? '',
   };
 }
 
@@ -59,6 +70,9 @@ export const LIMITS = {
   location: 100,
   unit: 30,
   notes: 2000,
+  brand: 100,
+  model: 100,
+  barcode: 64,
   quantity: 1_000_000,
 } as const;
 
@@ -71,10 +85,30 @@ const FIELD_LABELS: Record<FieldName, string> = {
   unit: 'Unit',
   condition: 'Condition',
   notes: 'Notes',
+  brand: 'Brand',
+  model: 'Model',
+  barcode: 'Barcode',
 };
 
 /** Form order, used to list errors in the summary in the order the fields appear. */
-const FIELD_ORDER: FieldName[] = ['code', 'name', 'location', 'category', 'condition', 'quantity', 'unit', 'notes'];
+const FIELD_ORDER: FieldName[] = [
+  'code',
+  'name',
+  'location',
+  'brand',
+  'model',
+  'barcode',
+  'category',
+  'condition',
+  'quantity',
+  'unit',
+  'notes',
+];
+
+/** Barcode as stored: spaces removed; must then be letters/digits only. */
+export function normalizeBarcode(raw: string | undefined): string {
+  return (raw ?? '').replace(/\s+/g, '');
+}
 
 const QUANTITY_RULE = `Quantity must be a whole number from 0 to ${LIMITS.quantity.toLocaleString('en')}.`;
 
@@ -99,12 +133,30 @@ export function validate(values: FormValues): FieldErrors {
   else if (Number(q) > LIMITS.quantity) errors.quantity = QUANTITY_RULE;
   if (values.unit.trim().length > LIMITS.unit) errors.unit = tooLong('unit');
   if (values.notes.trim().length > LIMITS.notes) errors.notes = tooLong('notes');
+  if ((values.brand ?? '').trim().length > LIMITS.brand) errors.brand = tooLong('brand');
+  if ((values.model ?? '').trim().length > LIMITS.model) errors.model = tooLong('model');
+  const barcode = normalizeBarcode(values.barcode);
+  if (barcode.length > LIMITS.barcode) errors.barcode = tooLong('barcode');
+  else if (/[^A-Za-z0-9]/.test(barcode)) errors.barcode = 'A barcode can only contain letters and digits.';
   return errors;
 }
 
-export function toInput(values: FormValues): ItemInput {
+/**
+ * Optional Phase 1.5 text: a value, null to clear one the item had, or undefined (leave it out)
+ * when it was and stays empty.
+ */
+function optionalText(value: string | undefined, before: string | null | undefined): string | null | undefined {
+  const v = (value ?? '').trim();
+  if (v) return v;
+  return before ? null : undefined;
+}
+
+export function toInput(values: FormValues, original?: Pick<Item, 'brand' | 'model' | 'barcode'> | null): ItemInput {
   const loc = parseLocation(values.location);
   return {
+    brand: optionalText(values.brand, original?.brand),
+    model: optionalText(values.model, original?.model),
+    barcode: optionalText(normalizeBarcode(values.barcode), original?.barcode),
     code: values.code.trim().toUpperCase(),
     name: values.name.trim(),
     category: values.category.trim() || null,
@@ -126,6 +178,9 @@ const KNOWN_FIELDS: Record<string, FieldName> = {
   unit: 'unit',
   condition: 'condition',
   notes: 'notes',
+  brand: 'brand',
+  model: 'model',
+  barcode: 'barcode',
 };
 
 /** Raw validator wording ("Too big: expected string to have <=100 characters") that users shouldn't see. */
@@ -196,8 +251,15 @@ export function ItemFormPage() {
   return <ItemForm key={id ?? 'new'} item={item.data} />;
 }
 
+/** 409 for a duplicate barcode (rather than a duplicate code). */
+function isBarcodeConflict(err: ApiError): boolean {
+  const d = err.details as { field?: unknown; path?: unknown } | undefined;
+  return d?.field === 'barcode' || d?.path === 'barcode' || /barcode/i.test(err.message);
+}
+
 function ItemForm({ item }: { item: Item | null }) {
   const navigate = useNavigate();
+  const { leader, unlock, runAsLeader } = useLeader();
   const location = useLocation();
   const [values, setValues] = useState<FormValues>(() => (item ? fromItem(item) : EMPTY));
   const [submitted, setSubmitted] = useState(false);
@@ -242,8 +304,8 @@ function ItemForm({ item }: { item: Item | null }) {
 
     setSaving(true);
     try {
-      const input = toInput(values);
-      const saved = item ? await api.updateItem(item.id, input) : await api.createItem(input);
+      const input = toInput(values, item);
+      const saved = await runAsLeader(() => (item ? api.updateItem(item.id, input) : api.createItem(input)));
       showFlash(item ? 'Changes saved.' : `Added “${saved.name}”.`);
       if (item && !isRootEntry(location)) {
         // The edit form is opened from the item's page: return to that history entry so Back
@@ -255,7 +317,11 @@ function ItemForm({ item }: { item: Item | null }) {
       }
     } catch (err) {
       setSaving(false);
-      if (err instanceof ApiError && err.status === 409) {
+      if (isLeaderCancelled(err)) return; // PIN dialog closed: keep the form as it is
+      if (err instanceof ApiError && err.status === 409 && isBarcodeConflict(err)) {
+        setServerErrors({ barcode: 'Another item already has this barcode.' });
+        setFormError('That barcode is already used by another item.');
+      } else if (err instanceof ApiError && err.status === 409) {
         setServerErrors({ code: 'Another item already uses this code. Please choose a different one.' });
         setFormError('That item code is already taken.');
       } else if (err instanceof ApiError && err.status === 400) {
@@ -309,6 +375,15 @@ function ItemForm({ item }: { item: Item | null }) {
         <ChevronLeftIcon /> {item ? 'Back to item' : 'Back to search'}
       </Link>
       <PageHeading>{item ? `Edit ${item.code}` : 'Add an item'}</PageHeading>
+
+      {!leader && (
+        <p className="note">
+          <span aria-hidden="true">🔒 </span>Saving needs the leader PIN — you'll be asked when you save.{' '}
+          <button type="button" className="link-button" onClick={unlock}>
+            Unlock now
+          </button>
+        </p>
+      )}
 
       {(formError || errorList.length > 0) && (
         <div ref={summaryRef} tabIndex={-1} className="alert alert--error" role="alert">
@@ -408,6 +483,59 @@ function ItemForm({ item }: { item: Item | null }) {
                 </p>
               )}
             </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor={fid('brand')}>
+              Brand <span className="req">(optional)</span>
+            </label>
+            <input
+              id={fid('brand')}
+              value={values.brand ?? ''}
+              onChange={(e) => set('brand', e.target.value)}
+              placeholder="e.g. Coleman"
+              autoComplete="off"
+              spellCheck={false}
+              autoCapitalize="words"
+              aria-invalid={errors.brand ? true : undefined}
+              aria-describedby={describedBy('brand')}
+            />
+            {fieldError('brand')}
+          </div>
+
+          <div className="field">
+            <label htmlFor={fid('model')}>
+              Model <span className="req">(optional)</span>
+            </label>
+            <input
+              id={fid('model')}
+              value={values.model ?? ''}
+              onChange={(e) => set('model', e.target.value)}
+              placeholder="e.g. Sundome 4P"
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={errors.model ? true : undefined}
+              aria-describedby={describedBy('model')}
+            />
+            {fieldError('model')}
+          </div>
+
+          <div className="field">
+            <label htmlFor={fid('barcode')}>
+              Barcode <span className="req">(optional)</span>
+            </label>
+            <input
+              id={fid('barcode')}
+              value={values.barcode ?? ''}
+              onChange={(e) => set('barcode', e.target.value)}
+              placeholder="Shop barcode number"
+              autoComplete="off"
+              spellCheck={false}
+              inputMode="numeric"
+              aria-invalid={errors.barcode ? true : undefined}
+              aria-describedby={describedBy('barcode')}
+            />
+            {fieldError('barcode')}
           </div>
 
           <div className="field">

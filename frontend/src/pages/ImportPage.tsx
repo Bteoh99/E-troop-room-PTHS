@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import type { ImportPreviewRow, ImportResult, ImportRowError } from '../api/types';
 import { PageHeading } from '../components/PageHeading';
+import { isLeaderCancelled, useLeader } from '../leader/LeaderContext';
 import { Loading } from '../components/StatusViews';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { conditionLabel } from '../lib/conditions';
@@ -105,6 +106,7 @@ function formatSize(bytes: number): string {
 
 export function ImportPage() {
   useDocumentTitle('Import');
+  const { leader, unlock, runAsLeader } = useLeader();
   const [step, setStep] = useState<Step>({ kind: 'choose' });
   const inputRef = useRef<HTMLInputElement>(null);
   const inputId = useId();
@@ -113,9 +115,13 @@ export function ImportPage() {
   async function runCheck(file: File) {
     setStep({ kind: 'checking', file });
     try {
-      const result = await api.importFile(file, true);
+      const result = await runAsLeader(() => api.importFile(file, true));
       setStep({ kind: 'preview', file, result });
     } catch (err) {
+      if (isLeaderCancelled(err)) {
+        setStep({ kind: 'choose', problem: 'Importing needs the leader PIN. Choose the file again after unlocking.' });
+        return;
+      }
       setStep({ kind: 'error', file, error: await explainUploadError(err, file), during: 'check' });
     }
   }
@@ -123,9 +129,13 @@ export function ImportPage() {
   async function runImport(file: File, preview: ImportResult) {
     setStep({ kind: 'importing', file, result: preview });
     try {
-      const result = await api.importFile(file, false);
+      const result = await runAsLeader(() => api.importFile(file, false));
       setStep({ kind: 'done', result });
     } catch (err) {
+      if (isLeaderCancelled(err)) {
+        setStep({ kind: 'preview', file, result: preview });
+        return;
+      }
       setStep({ kind: 'error', file, error: await explainUploadError(err, file), during: 'import', result: preview });
     }
   }
@@ -160,6 +170,15 @@ export function ImportPage() {
       </p>
 
       <Steps current={step.kind === 'done' ? 2 : step.kind === 'preview' || step.kind === 'importing' ? 1 : 0} />
+
+      {!leader && (
+        <p className="note">
+          <span aria-hidden="true">🔒 </span>Importing needs the leader PIN — you'll be asked when you choose a file.{' '}
+          <button type="button" className="link-button" onClick={unlock}>
+            Unlock now
+          </button>
+        </p>
+      )}
 
       {step.kind !== 'done' && (
         <section className="card" aria-labelledby="choose-heading">
@@ -334,9 +353,7 @@ function ImportErrorBox({
     (step.error instanceof ApiError && (step.error.status === 400 || step.error.status === 413));
   return (
     <div className="status status--error" role="alert">
-      <p className="status__title">
-        {errorTitle(step)}
-      </p>
+      <p className="status__title">{errorTitle(step)}</p>
       <p>{message}</p>
       {hints.map((h) => (
         <p key={h}>{h}</p>
@@ -482,8 +499,18 @@ function actionLabel(action: unknown): string {
   return typeof action === 'string' ? (ACTION_LABELS[action] ?? action) : '—';
 }
 
+/** Optional Phase 1.5 columns, shown only when some preview row has a value for them. */
+const OPTIONAL_COLUMNS = [
+  { key: 'brand', label: 'Brand' },
+  { key: 'model', label: 'Model' },
+  { key: 'barcode', label: 'Barcode' },
+] as const;
+
 function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
   if (rows.length === 0) return null;
+  const extra = OPTIONAL_COLUMNS.filter((c) =>
+    rows.some((r) => r[c.key] !== null && r[c.key] !== undefined && r[c.key] !== ''),
+  );
   return (
     <div className="table-wrap">
       <table className="table table--wide" data-testid="import-preview">
@@ -498,6 +525,11 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
             <th scope="col">Code</th>
             <th scope="col">Location</th>
             <th scope="col">Name</th>
+            {extra.map((c) => (
+              <th key={c.key} scope="col">
+                {c.label}
+              </th>
+            ))}
             <th scope="col">Category</th>
             <th scope="col">Qty</th>
             <th scope="col">Condition</th>
@@ -513,6 +545,11 @@ function PreviewTable({ rows }: { rows: ImportPreviewRow[] }) {
                 <strong>{cell(r.locationCode)}</strong>
               </td>
               <td>{cell(r.name)}</td>
+              {extra.map((c) => (
+                <td key={c.key} className={c.key === 'barcode' ? 'code' : undefined}>
+                  {cell(r[c.key])}
+                </td>
+              ))}
               <td>{cell(r.category)}</td>
               <td>
                 {cell(r.quantity)} {r.unit ? String(r.unit) : ''}

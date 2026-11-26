@@ -17,6 +17,10 @@ export interface Item {
   unit: string;
   condition: Condition;
   notes: string;
+  /** Phase 1.5 fields (optional so older data/tests stay valid). */
+  brand?: string | null;
+  model?: string | null;
+  barcode?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -31,6 +35,9 @@ export interface ItemInput {
   unit?: string;
   condition?: Condition;
   notes?: string;
+  brand?: string | null;
+  model?: string | null;
+  barcode?: string | null;
 }
 
 export interface ItemFilters {
@@ -102,4 +109,34 @@ export interface ImportResult {
 
 export interface ApiErrorBody {
   error: { message: string; details?: unknown };
+}
+
+// ---- Phase 1.5 ----
+
+export interface AuthStatus {
+  pinSet: boolean;
+  leader: boolean;
+}
+
+export interface LoginResult {
+  token: string;
+  expiresAt: string;
+}
+
+export interface ScanMatchRequest {
+  text?: string;
+  barcode?: string;
+}
+
+export interface ScanMatch {
+  item: Item;
+  /** 0..1 */
+  score: number;
+  /** e.g. ["brand", "model"] */
+  matchedOn: string[];
+}
+
+export interface ScanMatchResponse {
+  matches: ScanMatch[];
+  query: { tokens: string[]; barcode?: string };
 }
