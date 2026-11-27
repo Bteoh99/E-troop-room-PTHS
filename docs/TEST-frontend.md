@@ -193,3 +193,165 @@ Neither change weakens what the tests check.
 - `frontend/e2e/round2-tester.spec.ts` (14 tests × 2 projects).
 - `frontend/tests/helpers.tsx` now has hidden Back/Forward history buttons and `browserBack()`, which simulate the browser's buttons in `MemoryRouter` tests.
 - The developer's own `tests/round2.test.tsx` and `e2e/round2.spec.ts` were not changed, and they pass.
+
+---
+
+## Phase 1.5 (commit f23f178): leader mode, Scan, Needs a location
+
+Dates: 2026-11-26 and 27.
+- Dev-mode e2e ran with backend `:3401` and Vite `:5473`, a fresh temp DB and PIN 2468 (set by global-setup), with `--trace off`.
+- **Production mode** was also run. I built the frontend with `vite build --outDir <tmp>`; the repo's `dist/` was not touched. The backend then served it with `NODE_ENV=production FRONTEND_DIST=<tmp> HOST=127.0.0.1 PORT=3401` and its own temp DB and config. The whole Playwright suite ran against it with `E2E_NO_SERVER=1 E2E_BASE_URL=http://localhost:3401 E2E_PROD=1`.
+- All servers were stopped afterwards and the temp build was deleted.
+
+### Results
+
+| Suite | Tests | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| Vitest, all files (new: `tests/phase15-tester.test.tsx`, 62 tests) | 345 | 342 | **3** | 0 |
+| Playwright, dev mode, all specs (new: `e2e/phase15-tester.spec.ts`, 23 tests × 2 projects) | 124 | 117 | **2** | 5 |
+| Playwright, **production build**, all specs | 124 | 121 | **2** | 1 |
+
+- The 5 dev-mode skips are the 2 production-only tests in each of the 2 projects, plus the 360-px-only layout test on desktop.
+- In production mode only that 360-px skip remains.
+- `npm run typecheck` passes.
+- All 5 failing tests are **app bugs**, 3 distinct ones (P15-1 to P15-3 below). None is a test bug.
+- All tests from earlier rounds and the developer's `phase15` tests pass.
+
+### App bugs
+
+**P15-1 (medium, a11y/mobile): after a wrong PIN, the PIN box loses focus.**
+- Failing tests:
+  - vitest *wrong PIN: message, input cleared and focused…*
+  - e2e *wrong PIN keeps the dialog open… PIN box ready to type again*, which fails on desktop and 360 px, in both dev and production mode.
+- Steps:
+  1. While locked, tap a gated action, or the 🔒 Leader button.
+  2. Enter a wrong PIN and tap **Unlock**.
+- Expected: "That PIN isn't right" is shown and the cleared PIN box has focus, so the user can type again (the code even calls `inputRef.current?.focus()` for this).
+- Actual: focus is on nothing (`<body>`). On a phone the numeric keyboard closes and the user has to tap the box again. The same happens after a 429 or a network error.
+- Cause: the input is `disabled={busy}`. `setBusy(false)` and `focus()` run in the same tick, so `focus()` runs while the input is still disabled. Fix: focus in an effect after `busy` turns false, or use `readOnly` instead of `disabled`.
+
+**P15-2 (medium): unlocking does nothing when localStorage reads work but writes throw.**
+- This happens with a full storage quota, older Safari private mode, or some locked-down Android WebViews.
+- Failing test: vitest *localStorage where only writes fail…*.
+- Steps: `localStorage.setItem` throws (`QuotaExceededError`) while `getItem` works. Enter the right PIN.
+- Expected: leader mode turns on, keeping the token in memory as the README promises ("in-memory fallback").
+- Actual: the dialog closes and the action carries on, but `getToken()` is `null` and the button still says "Leader".
+  - The write goes out without a token and gets a 401, which re-prompts for the PIN.
+  - Re-entering the PIN fails the same way, so the user sees "Leader PIN required" after two PIN entries.
+- Cause: `readStorage()` only falls back to `memory` when `getItem` *throws*. Here `getItem` returns `null`, so the in-memory token is never used.
+- The "everything throws" case works and has a passing test.
+
+**P15-3 (low): leaving the Scan page mid-scan does not stop the scan.**
+- Failing test: vitest *leaving the page mid-scan abandons the scan…*.
+- Steps: pick a photo, then tap another tab while it is "Reading text…".
+- Expected: the abandoned scan stops; at least, no `/api/scan/match` request is sent afterwards.
+- Actual: when the OCR finishes in the background, the match request is still sent. The unmounted page then updates its state, which is harmless in React 18.
+- Cause: `runId` is only bumped by a new scan, not on unmount. Bumping it in an unmount cleanup fixes it. There is nothing visible to the user; it wastes battery and a request on old phones.
+
+### Test-harness finding (not an app bug; for whoever owns `playwright.config.ts`)
+- `use.extraHTTPHeaders: { Authorization: Bearer <leader token> }` is applied by Playwright to **browser** requests too, not only to the `request` fixture.
+- This **overrides the app's own Authorization header** on every page request. A forged or stale token in the app, and a "locked" page's writes, all reach the backend with the valid e2e token.
+- My first runs of *stored token the server no longer accepts is dropped* and *401 mid-session* failed for this reason. Those were test-environment failures, not app bugs.
+- My leader-mode tests now run with `extraHTTPHeaders: {}` and pass the token explicitly to API helper calls. After that change both pass against the real backend.
+- Other specs that check locked/401 behaviour in the browser should do the same, or the token should be given only to the `request` fixture.
+
+### What is covered (all passing unless listed above)
+
+**Leader mode (vitest, API mocked)**
+- Every gated action, locked: Add tab, Import tab, Edit, Delete (PIN first, then the delete confirmation, then the delete), Save on the add and edit forms opened by URL, choosing an import file (PIN before the dry run, then Confirm), and Save on `/locate`. Each one shows PIN → action continues, and Cancel/Escape does nothing.
+- The same actions while unlocked never open the dialog or call login.
+- The 🔒 hints and the leader-button names change with the state.
+- PIN dialog:
+  - `inputmode=numeric`, `autocomplete=off`, masked input, non-digits removed, maximum 8 digits.
+  - A PIN under 4 digits is refused without asking the server.
+  - Wrong PIN, then the right PIN, continues the action.
+  - 429 shows "wait 5 minutes", and Cancel then runs nothing.
+  - A 403 on login shows the setup-needed dialog, which has focus on OK.
+  - A 403 on a write shows the same setup dialog.
+  - A network error is shown in the dialog.
+  - Focus goes back to the opener.
+- 401 mid-session:
+  - The token is cleared and the dialog explains the session ended. After unlocking, the save is retried exactly once.
+  - **No loop:** a second 401 shows an error without a third prompt; login is called once and the write twice.
+  - Cancelling keeps the form values.
+  - A 401 on delete re-prompts, then deletes.
+  - A 401 on the real import retries the real import (`true,false,false`), not the dry run.
+- Token checks:
+  - A server status of `leader:false` drops the token.
+  - An offline status check keeps it.
+  - Lock clears both storage and memory.
+  - An expired token counts as no token.
+  - A bare string or garbage stored value is handled.
+  - localStorage that throws on every call works from memory.
+  - Only-writes-throw storage fails (**P15-2**).
+
+**Leader mode (e2e, real PIN backend)**
+- Locked Edit → PIN → edit form; then Lock clears `localStorage`.
+- Wrong PIN fails on focus (**P15-1**). Only the desktop project sends a real wrong PIN, to stay under the 5-tries limit; the mobile project uses a mocked 401.
+- 429 and 403 (mocked responses): the wording is right.
+- A forged stored token is dropped on start.
+- **Real 401 mid-session:** a stale token makes the save get 401, the dialog asks again, and the PIN makes it 200. The PUT statuses are exactly `[401, 200]` and the data is saved.
+- Locked import shows the PIN, then the dry run.
+
+**Scan (vitest, `src/scan/engine` mocked)**
+- Works while locked.
+- Shows "Looking for a barcode…" with the inputs disabled.
+- A barcode hit skips OCR: one `scanMatch({barcode})` and a card with 📍 and "Matched on: barcode".
+- A barcode with no match falls back to OCR and sends `text` and `barcode` together.
+- OCR text is cleaned, and several matches are shown best first with "Matched on".
+- Text is cut to 2000 characters.
+- Editable text: "Search with this text" is disabled when empty, and searching again replaces the results.
+- Empty OCR gives the no-match screen without calling the API, and "Try another photo" clicks the camera input.
+- OCR failure shows an error; the next photo then works.
+- Image-preparation errors are shown.
+- A failed match keeps the text for a retry.
+- The same photo can be picked twice.
+- Leaving mid-scan still sends the match request (**P15-3**), but coming back gives a fresh, idle page.
+- The 📷 button and the Scan tab go to `/scan`.
+
+**Scan (e2e, real tesseract.js and zxing; all non-localhost requests blocked and recorded)**
+
+All photos are PNGs drawn in the browser canvas.
+- A "COLEMAN / SUNDOME 4P / Made in China" label is read by OCR. It finds the item created with that brand and model ("Matched on: brand…", 📍 R06-D-2), and the editable text contains COLEMAN.
+- A noisy, tilted "TNT-OO4" label (with the letter O) finds **TNT-004 first** ("Matched on: item code", R01-B-2).
+  - I tuned the noise: with 900 specks plus a 2° tilt Tesseract read "© nroos", which is a limit of the test image; with 300 specks plus the tilt it reads `TNT-004`.
+- A blurry photo with no text gives the friendly no-match screen.
+- A **real EAN-13** is drawn by a small encoder in the test, with a valid check digit and a different barcode per project. It finds the item by barcode, and **no `/ocr/` file is ever requested**, which proves OCR was skipped.
+- Fixing the text to "tnt 0O4 dome" and searching again finds TNT-004.
+- No external request was attempted in any scan test, and there were no console errors.
+
+**Needs a location**
+- Vitest:
+  - Rows show code, name and quantity, with a live normalised preview.
+  - Enter saves, focus walks down the list, the last row's focus goes up, and the list ends in the empty state.
+  - Rack prefix ("rack 3" + `b-2` gives `R03-B-2`); a full coordinate wins over the prefix; an invalid prefix is flagged.
+  - Empty or non-coordinate text is refused: focus stays, `aria-invalid` is set, the error clears on typing and nothing is saved.
+  - A save error stays on its row.
+  - Current non-coordinate locations ("Now: “shed corner”") are shown.
+  - List load error, then retry, then the empty state.
+  - Unlocking from the page note saves without a second prompt.
+  - The Map note links to `/locate`.
+- E2e (real backend):
+  - Enter saves, the row disappears and focus moves to the next box.
+  - Rack prefix `r7` + `c-2` saves `R07-C-2`.
+  - "behind the door" is refused with focus kept.
+  - The items' locations are checked through the API afterwards.
+  - Locked: Enter → PIN (submitted with Enter) → saved, with focus on the next box.
+  - Empty state.
+  - The Search badge and the Map note both lead to `/locate`.
+
+**Deep links**
+- Vitest: `/scan`, `/locate`, `/items/7`, `/items/7/edit` and `/import` render while locked, without a dialog.
+- Vitest: brand, model and barcode appear on the detail page.
+- E2e: `/scan`, `/locate`, `/items/new`, `/import` and `/racks/r1` load directly and after a reload, with no console errors. They also pass against the production server through its SPA fallback.
+
+**Production mode (E2E_PROD=1)**
+- The CSP includes `'wasm-unsafe-eval'`, and `X-Frame-Options: DENY` is set.
+- `index.html` is served `no-cache` and has no inline script. Hashed assets are `immutable`. `/assets/does-not-exist.js` returns a real 404. `/locate` falls back to `index.html`. `/api/*` responses are `no-store`.
+- `/ocr/worker.min.js`, the SIMD core and `eng.traineddata.gz` are all served.
+- **OCR scan under the production CSP works** (a TNT-004 label found TNT-004), with no CSP violation, no console error and no external request.
+- The entire existing suite also passes in production mode, except P15-1.
+
+### Files
+- New: `frontend/tests/phase15-tester.test.tsx` and `frontend/e2e/phase15-tester.spec.ts`.
+- No app source, backend or Playwright config was changed, and nothing was committed.
