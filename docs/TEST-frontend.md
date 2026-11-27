@@ -355,3 +355,45 @@ All photos are PNGs drawn in the browser canvas.
 ### Files
 - New: `frontend/tests/phase15-tester.test.tsx` and `frontend/e2e/phase15-tester.spec.ts`.
 - No app source, backend or Playwright config was changed, and nothing was committed.
+
+---
+
+## Phase 1.5 fix verification (commit 46f3f3e)
+
+Date: 2026-11-27. E2E ran in dev mode (backend `:3401`, Vite `:5473`, fresh temp DB, PIN 246810, `--trace off`). Servers were stopped afterwards.
+
+| Suite | Tests | Passed | Failed | Skipped |
+|---|---:|---:|---:|---:|
+| Vitest, all files | 382 | 382 | 0 | 0 |
+| Playwright, dev mode, all specs | 132 | 127 | 0 | 5 |
+
+The 5 skips are the 2 production-only tests in each project plus the 360-px-only test on desktop.
+
+**Earlier failures, all now passing:**
+- P15-1, PIN box focus after a wrong PIN: the vitest test and the e2e test on desktop and 360 px pass.
+- P15-2, writes-only storage failure: passes.
+- P15-3, leaving the Scan page mid-scan: passes.
+
+**The developer's adjustments to my tests are legitimate:**
+- In `phase15-tester.test.tsx`, PIN `2468` became `246810`, and the too-short message became "The PIN is 6 to 8 digits." This follows the lead's 6–8 digit rule.
+- In `phase15-tester.spec.ts`, only the default PIN changed.
+- Nothing was removed or loosened:
+  - The 429 test still asserts "wait 5 minutes".
+  - The no-loop and 401 tests are unchanged.
+  - My spec still sends its own explicit token header; it matches `e2e/leader.ts`.
+- `use.extraHTTPHeaders` was removed from `playwright.config.ts`. That resolves the harness finding from the Phase 1.5 run.
+
+**New regression tests (all pass):**
+- `frontend/tests/phase15-fixcheck-tester.test.tsx` (13 tests):
+  - OCR language file fails to load: clear "text reader couldn't load … eng.traineddata.gz" error, no match request is sent, and the next photo retries and works.
+  - PIN 429 wording for Retry-After of 300, 120 and 45 seconds, 1 second ("wait a moment") and none. Also `details.retryAfterSeconds`. The PIN box keeps focus.
+  - Scan 429 wording for 30 and 90 seconds and none. The recognised text is kept.
+  - 503 damaged-settings dialog, both on login (focus on OK; the action does not run) and on a `/locate` save (the row is kept).
+  - Short-PIN notice: shown after unlocking with `2468` (an old 4-digit PIN is still sent), can be dismissed, and blocks nothing. Not shown for a long-enough PIN.
+- `frontend/e2e/phase15-fixcheck-tester.spec.ts` (4 tests × 2 projects):
+  - The first `eng.traineddata.gz` download is aborted with real tesseract. The error is shown, and the next photo finds TNT-004.
+  - A real `Retry-After: 30` header on scan gives "wait 30 seconds".
+  - `Retry-After: 120` on PIN login gives "wait 2 minutes".
+  - Login 503 opens the repair dialog.
+
+**Remaining app bugs: none found.**
