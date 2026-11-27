@@ -219,3 +219,147 @@ This is a side effect of the m5 reset (`r2-import-choose-after-pick-360.png`). T
 ### Round 2 verdict
 
 **Approve.** Both Majors and all eight Minors are fixed and verified in the running app, with no regressions. What remains is one new Minor, R2-1 (a scroll cue for wide racks on the rack page), plus the Nits n4, n6 (partial), R2-2 and R2-3. None of them blocks Phase 1.
+
+---
+
+## Phase 1.5 review (commit f23f178, frontend)
+
+**Scope.** Leader mode (`src/leader/`, `src/lib/auth.ts`, `api/client.ts`), the gating of every write path, the Scan pipeline (`src/scan/*`, `pages/ScanPage.tsx`, `scripts/copy-ocr-assets.mjs`), `/locate`, brand/model/barcode in the form, cards and import, and the production build served by the backend. The checks are SPEC §F plus the Phase 1.5 backend notes.
+
+### How it was verified
+
+- **Build.** `tsc` passes. `vite build` (to a temp dir): the main chunk `index-*.js` is 236 kB (75 kB gzip) and contains **no** tesseract or zxing code (grep). `ScanPage-*.js` is 414 kB (113 kB gzip). OCR assets land in `dist/ocr/`: worker 0.1 MB, two LSTM cores of 3.9 MB each, `eng.traineddata.gz` 2.9 MB.
+- **Server.** The backend ran on `PORT=3301` with `NODE_ENV=production`, `FRONTEND_DIST=<temp dist>`, a temp DB and a temp `CONFIG_PATH`, with the PIN set via `npm run set-pin -- --pin 2468`. The CSP header was exactly as in SPEC. Deep links `/scan`, `/locate` and `/items/:id/edit` return 200 HTML. A missing `/assets/x.js` returns 404.
+- **Browser runs.** Playwright Chromium at 360×740 and 1280×800, deviceScaleFactor 1. Screenshots are `/tmp/fe-review-shots/p15-*.png`. No page scrolls horizontally at 360 px (`/`, `/scan`, `/locate`, `/map`, item detail and edit, `/import`, `/items/new`).
+- **Scan, production build.**
+  - Nothing scan-related loads on `/`. The chunk loads when the Scan page opens. `/ocr/*` loads only on the first OCR.
+  - Only `worker.min.js`, `tesseract-core-simd-lstm.wasm.js` and `eng.traineddata.gz` are fetched, all from our origin. **Zero external requests and zero CSP violations.** The CDN URLs that tesseract.js bundles as defaults are overridden and never used.
+  - A synthetic EAN-13 photo is decoded by the bundled zxing (headless Chromium has no `BarcodeDetector`) and matches "Head torch (LED)" on barcode.
+  - A label photo ("COLEMAN / Sundome 4P …") is OCR'd correctly and matches the Coleman items on brand and model.
+  - A 4000×3000 (12 MP) JPEG is downscaled, OCR'd ("PETZL / Tikkina") and matched.
+  - A blank photo gives "No matching item found".
+  - Editing the text and pressing "Search with this text" works.
+- **Leader mode, production build.**
+  - Locked Add, Import, Edit, Delete and `/locate` Save all open the PIN dialog first and carry on after unlocking. The import **dry run** is also gated: no `/api/import` request is sent before the PIN.
+  - A 401 clears the token, re-asks for the PIN and retries once (2 PUTs). An "always 401" server stops after exactly 2 PUTs and shows the error, so it **cannot loop**.
+  - A garbage stored token is cleared by `/api/auth/status` on load.
+  - Lock removes `etroop.leaderToken`.
+  - The token never appears in a URL or the console.
+  - With `localStorage` fully throwing, the in-memory fallback works.
+  - Mocked 429 shows "Too many wrong tries — wait 5 minutes…". Mocked 403 switches to the "Leader PIN not set up" dialog with focus on OK.
+- **Unit tests.** The concurrent tester's `tests/phase15-tester.test.tsx` (untracked) currently has 3 failing tests. They match P1, P4 and P5 below independently.
+
+### Major
+
+**P1. After a wrong PIN, focus is lost: Escape and the focus trap stop working, and the phone keyboard closes.**
+`src/leader/PinDialog.tsx:48-56` with `:125`.
+
+The catch block calls `setBusy(false)` and then immediately `inputRef.current?.focus()`. At that moment the input is still `disabled={busy}`, because React has not re-rendered yet, so `focus()` does nothing and focus falls to `<body>`.
+
+Verified: after a wrong PIN, `document.activeElement` is BODY. Four Tabs land on the page's "Search" tab link outside the dialog. **Escape does nothing**, because the `onKeyDown` handler sits on the dialog and focus is no longer inside it. On a phone, the numeric keyboard closes after every wrong try, so the leader has to tap the box again. The same happens after 429 and network errors.
+
+Fix: move focus in an effect after re-render (e.g. `useEffect(() => { if (!busy && error) inputRef.current?.focus(); }, [busy, error])`), or use `readOnly` instead of `disabled` while checking. Also attach the Escape handler at `document` level while the dialog is open.
+
+**P2. If the OCR language data or core fails to load mid-way, the scan hangs forever, and every later scan in that tab hangs too.**
+`src/scan/ocr.ts:18-37`, `src/pages/ScanPage.tsx:84-89`.
+
+Verified with requests aborted in a fresh browser context:
+
+| Blocked file | Result |
+|---|---|
+| `eng.traineddata.gz` | Spinner stays on "Starting the text reader… (the first time can take a while)" for over 60 s and never ends. The only signal is an uncaught `Error: TypeError: Failed to fetch` page error. Both photo buttons stay disabled (`busy`), so the user can't retry. |
+| core or `worker.min.js` | Fails properly, but only with the generic "Something went wrong while reading the photo." |
+
+Because `workerPromise` is cached while still pending, it never resolves or rejects. Every later scan in the tab therefore hangs at the same step, even after the Wi-Fi recovers, until a full page reload.
+
+Real triggers:
+- flaky troop Wi-Fi during the one-time ~7 MB download;
+- a laptop `dist/` built without the `ocr/` files (e.g. `vite build` run directly, skipping `prebuild`).
+
+Fix:
+- Wrap worker creation and `recognize` in a timeout (e.g. 60–90 s for loading, then per job). On timeout or error, `terminate()` the worker and reset `workerPromise`.
+- Listen for tesseract's `errorHandler` option, or worker `error` events, so load failures reject.
+- Map failures to a clear message: "The text reader couldn't load from the laptop — check the Wi-Fi and try again", plus "Type to search". Keep any barcode result already found.
+- Make `copy-ocr-assets` failures fail the build, which `prebuild` already does. Also make the backend or `start.bat` warn when `dist/ocr/` is missing.
+
+### Minor
+
+**P3. Tesseract worker is never terminated; scans aren't cancelled when the user leaves.**
+`src/scan/ocr.ts:15-49`, `src/pages/ScanPage.tsx:41-113` (there is no unmount cleanup).
+
+The worker (wasm heap plus language model, tens of MB) lives for the whole session, even after the user leaves Scan. Verified: Playwright's worker `close` event never fires after navigating to `/map` mid-OCR. On the old Android phones in the brief, this memory competes with Chrome's tabs.
+
+The running job also isn't cancelled:
+- `runId` isn't bumped on unmount, so the pipeline still sends `/api/scan/match` after the page has closed (the tester's failing "leaving the page mid-scan" test).
+- `progressListener` is module-global, so a job abandoned on one visit drives, and then nulls (`finally`), the progress of the next visit's job, which also has to queue behind it.
+
+Fix:
+- On unmount, `runId.current++`.
+- Terminate the worker after N minutes idle, or on unmount when a job was running (`worker.terminate()` + `workerPromise = null`).
+- Pass the progress callback per job, or check the job id in the logger.
+
+**P4. `localStorage` that can be read but not written loses the token, so leader mode can never turn on.**
+`src/lib/auth.ts:17-35, 51-58`.
+
+`setToken` falls back to `memory` when `setItem` throws, but `readStorage` only returns `memory` when `getItem` *throws*. When writes fail but reads work (quota full, old private modes), `getItem` returns `null` and the in-memory token is ignored.
+
+Verified: the user enters the PIN, the save fails with 401, they are asked for the PIN again, and then they get "Leader PIN required. Unlock leader mode first." The button stays 🔒. (The tester's failing quota test shows the same.)
+
+Fix: in `readStorage`, return `memory` when storage has no value (`if (!raw) return memory;`). Alternatively keep a "storage writable" flag.
+
+**P5. `/locate`: after the last item is saved, focus drops to `<body>`.**
+`src/pages/LocatePage.tsx:88-92`.
+
+`next` is `undefined` for the final row, so nothing is focused. The row is removed and the empty state appears. Verified: `activeElement` is BODY, and the announcement is only "Saved UNL-005 at R03-D-1.".
+
+Fix: when there is no next row, focus the empty state's heading (render it with `pageHeading` or a `tabIndex={-1}` heading) and announce "Every item has a location."
+
+The rest of the flow works well (verified):
+- A locked Enter opens the PIN dialog; after unlocking, the save goes through and focus jumps to the next box.
+- The announcement reads "Saved UNL-001 at R01-A-3. Next: Unlocated thing 2.".
+- Rack prefix `R03` + `b-4` gives `R03-B-4`. An invalid entry keeps focus and shows an inline error.
+- The server confirms 0 unlocated items afterwards.
+
+**P6. Peak memory with 12 MP photos: the full-size image is decoded twice.**
+`src/scan/imagePrep.ts:13-31`, `src/pages/ScanPage.tsx:58, 190`.
+
+`createImageBitmap(file)` decodes at full resolution: about 48 MB for 4000×3000 RGBA, before the 1600 px downscale. At the same time, the 120 px thumbnail `<img src={objectURL of the original}>` makes the browser decode the full 12 MP image again. Together with the canvas and `getImageData` (about 10 MB), the peak is roughly 100 MB on the main thread on phones that may have 2–3 GB RAM. (Desktop Chromium copes: the 12 MP test finished in about 1.1 s. I couldn't measure memory on a real low-end phone here.)
+
+Fix:
+- Decode downscaled: read the dimensions first, then `createImageBitmap(file, { resizeWidth, resizeHeight, resizeQuality: 'medium', imageOrientation: 'from-image' })`.
+- Show the prepared canvas as the thumbnail (`canvas.toBlob` → object URL), not the original file.
+- Release the canvas (`canvas.width = 0`) once the scan is done.
+
+**P7. Scan error messages are generic.**
+`src/pages/ScanPage.tsx:108-111`.
+
+Tesseract rejects with non-`Error` values or terse network errors, so the user sees "Something went wrong while reading the photo." for a missing core, a worker 404 or a network drop. Map these to actionable text (see P2) and log the detail to the console for the maintainer.
+
+### Nit
+
+- **N1** `Layout.tsx:120`: the leader button's accessible name ("Leader mode on. Lock") doesn't contain the visible text "Leader on · Lock" (WCAG 2.5.3, label in name). Use the visible text plus extra context, e.g. "Leader on · Lock (leave leader mode)". Locking gives no confirmation; consider `announce('Leader mode off')`.
+- **N2** `PinDialog.tsx:52`: the 429 text is hard-coded to "5 minutes". The server sends `Retry-After` and `details.retryAfterSeconds` (and the backend is changing its rate limits), so show the real wait time.
+- **N3** `ScanPage.tsx:259`: `<h2 role="status">` replaces the heading role, so "Found N matches" is no longer a heading. Wrap the h2 in a `div role="status"` instead, as the no-match branch already does.
+- **N4** `ItemFormPage.tsx` (barcode input): `inputMode="numeric"` gives Android a digits-only keypad, but SPEC allows letters (Code 39/128). Use `inputMode="text"` with `autoCapitalize="characters"`, or add a hint.
+- **N5** `SearchPage.tsx:95`: at 360 px the camera button cuts the placeholder to "Search tent, TNT-00" (`p15-search-locked-360.png`). Shorten it, e.g. "Tent, TNT-004, R03…".
+- **N6** `auth.ts` / `LeaderContext.tsx`: the `leader` state isn't updated when the token expires while the app is open (30 days), or when another tab locks (no `storage` event listener). Writes still re-ask correctly, but the button can show "Leader on" while locked.
+- **N7** Locked Edit and Delete show a 🔒 that is `aria-hidden`, so screen-reader users only learn about the PIN when the dialog opens. Consider "Edit item (needs leader PIN)" as visually-hidden text.
+- **N8** `/ocr/*` is served `no-cache`, so it is revalidated on every first OCR per page load (a 304 is cheap) and isn't fingerprinted. Fine for now. If the files ever move under `assets/` with hashes, they get the immutable cache.
+
+### Not frontend (for the backend dev; noting only)
+
+- Scan ranking for the label "COLEMAN / Sundome 4P / 4 PERSON DOME TENT" put **TNT-004 "Sundome 4"** above **TNT-030 "Sundome 4P"**, which is the exact model. Both were "Matched on: model, brand, name". The exact model token should outrank a partial one. (`backend/src/lib/scanMatch.js` is being changed right now, so please re-check after that lands.)
+
+### Phase 1.5 verdict
+
+**Approve with changes.**
+- Token handling is sound: storage wrapped, retry-once can't loop, token never in URLs or logs, lock clears it.
+- Every write path is gated, including the import dry run and `/locate` saves.
+- Lazy loading really keeps tesseract and zxing out of the main bundle.
+- OCR and barcode run fully offline under the production CSP, with no CDN requests.
+
+Fix before handing the laptop over:
+- **P1**: PIN dialog focus after a wrong PIN.
+- **P2**: OCR hangs forever if its assets fail to load.
+
+P3–P5 are small and worth doing in the same pass. P6 matters mainly on the oldest phones.
