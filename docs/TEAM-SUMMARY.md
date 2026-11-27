@@ -1,4 +1,84 @@
-# e-Troop Store Room: Team Summary (Phase 1)
+# e-Troop Store Room: Team Summary
+
+> **Latest: Phase 1.5 (laptop hosting, leader PIN, scan, locations) is finished, approved by both reviewers, and fully tested.** Its summary and the **go-live checklist** come first below; the original Phase 1 summary follows after.
+
+## Phase 1.5: what was added
+
+**Final results** (run by the lead after the last fix):
+| Check | Result |
+|---|---|
+| Backend tests | **798 / 798 pass** |
+| Frontend component tests | **382 / 382 pass** |
+| Frontend browser tests (desktop + 360 px phone, real backend, real OCR) | **127 pass, 5 skipped** (the skips are production-only and phone-only tests, by design) |
+| Type check and production build | Pass |
+| Windows 10 scripts | Syntax checked, but **not yet run on a real Windows laptop** |
+
+**New features:**
+| Feature | What it does |
+|---|---|
+| **Laptop mode** | The app runs on the old Windows 10 laptop and starts automatically when the laptop is switched on. Phones on the same Wi-Fi open it in Chrome. No APK is needed. |
+| **Leader PIN (6–8 digits)** | Anyone can search, view and scan. Adding, editing, deleting, importing and setting locations need the PIN. |
+| **📷 Scan** | Take a photo of the item's own label or shop barcode, and the app shows the item and its 📍 location. Barcode reading and text reading both run on the phone, with no internet needed. |
+| **Brand / model / barcode** | New item fields, also read from Excel (incl. *Jenama*, *Kod bar*). A barcode that Excel stripped of its leading zero still matches. |
+| **Needs a location** | A fast list for typing locations while walking along the racks. Set the rack once, e.g. R03, then type just `B-2`. |
+| **Daily backups** | The database is copied automatically every day and the last 30 copies are kept. The copies can go to a USB drive or a Google Drive folder. |
+
+**What each subagent did in Phase 1.5:**
+| Subagent | Work and outcome |
+|---|---|
+| **Backend developer** | Built the PIN security, scan matching, laptop mode, backups and Windows scripts plus the setup guide. Fixed 3 rounds of findings, including a Critical one: hundreds of PIN guesses sent at once could beat the limit. Now only one guess per phone is checked at a time. |
+| **Frontend developer** | Built leader mode, the Scan screen (offline barcode + text reading), the Needs-a-location page and the new fields. Fixed 2 rounds of findings: PIN keyboard focus, the scan hanging when the text reader can't load, scans continuing after leaving the page, and memory use with big photos. |
+| **Backend reviewer** | First review: 1 Critical, 2 Major, 7 Minor, 8 Nit. Main issues: PIN guessing in parallel; laptop folder and PIN file not locked down on Windows; short number codes falsely matching "220-240V". Verified all fixed, then found one more (a database upgrade edge case), also fixed. **Approved.** |
+| **Frontend reviewer** | First review: 0 Critical, 2 Major, 5 Minor, 8 Nit. Main issues: PIN box losing focus; scan hanging forever if the text reader failed to load. Verified all fixed on the production build at phone size. **Approved.** |
+| **Backend tester** | Wrote 221 new tests covering PIN attacks, 14 path-trick attempts, zip bombs, barcodes and migrations. Found 5 bugs, all fixed (the last one, a barcode search with leading zeros, was fixed by the lead). |
+| **Frontend tester** | Wrote 99 new component tests and 27 browser tests, including real scans of generated label photos and a real EAN-13 barcode with internet blocked. Found 3 bugs and a test-setup flaw, all fixed. |
+
+**Decisions the lead made in Phase 1.5:**
+| Question | Decision |
+|---|---|
+| PIN length | 6–8 digits. An old 4–5 digit PIN still works, and leaders see a reminder to change it. |
+| Someone typing wrong PINs on purpose | That phone is blocked for 5 minutes. Everyone else only sees a short slowdown, never a lockout. |
+| Barcode lost its leading zero in Excel | It's treated as the same barcode, for search, scan and duplicates. |
+| Location that isn't a rack coordinate on the Needs-a-location page | Refused there, because it would leave the item without a location. |
+| Phones | Use Chrome over the troop Wi-Fi. No APK or Play Store app is needed. |
+
+## Go-live checklist (Windows 10 laptop)
+Follow `docs/SETUP-WINDOWS.md` for the details. **Take a photo of any error and send it to Claude.**
+
+**Before you start**
+- [ ] The laptop is **64-bit** Windows 10, plugged in, and on the troop Wi-Fi.
+- [ ] Ask whoever runs the router to give the laptop a **fixed IP address** (a DHCP reservation).
+- [ ] You know the Windows **administrator** password.
+- [ ] You've chosen a **6-digit PIN** that isn't a birthday, 123456 or the troop number.
+
+**Install**
+- [ ] Install Node.js 22 LTS (64-bit .msi, for all users) and Git, then restart the laptop.
+- [ ] `git clone https://github.com/Bteoh99/E-troop-room-PTHS.git eTroop` in `C:\`.
+- [ ] Double-click `C:\eTroop\windows\install.bat` and set the PIN when asked.
+- [ ] In Windows Wi-Fi settings, the troop network is set to **Private**.
+
+**Tests the reviewers asked for (only possible on the real laptop)**
+- [ ] Run `install.bat` a **second time**. It should finish without errors.
+- [ ] **Restart the laptop and don't log in.** After about a minute, open the app from a phone. It should load.
+- [ ] From a phone, search for an item, unlock leader mode with the PIN, and add a test item.
+- [ ] Scan a label and a barcode with the phone.
+- [ ] Unplug the internet and run `update.bat`. It should report the error and the app should **still run**.
+- [ ] Check that a backup file appears in the backup folder the next day.
+
+**Then**
+- [ ] Import the real Excel file (dry run first).
+- [ ] Use **Needs a location** to give every item its rack position.
+- [ ] On each leader's phone: Chrome, then the laptop address, then **⋮ → Add to Home screen**.
+
+## Known limits
+- Phones must be on the **same Wi-Fi** as the laptop. It won't work at camp unless remote access, e.g. Tailscale, is added later.
+- Text reading needs **printed** labels in good light. Logos and handwriting read poorly. Items without labels are found with the search box.
+- Identical items, like five identical tents, all match the same label. Telling them apart for check-in/out in Phase 2 will need individual code labels.
+- Deleting an item is still permanent. Phase 2 should change this to "write-off".
+
+---
+
+# Phase 1 summary
 
 **Status:** Phase 1 is finished, reviewed and tested. Both reviewers approved after their final checks, and the frontend developer fixed the last batch of small findings. I then ran every test suite myself.
 
