@@ -355,3 +355,56 @@ Run: `cd backend && npm test`, against commit `599115c`. Everything ran on in-me
 4. The SPA fallback skips any path whose last segment contains a dot (e.g. `/items/1.5` → 404). Current routes are not affected.
 5. The scan text limit is 2000 characters. A dense label can produce more OCR text than that, so the frontend should truncate before sending rather than get a 400.
 6. A one-character transposition in a brand (`Peztl` for `Petzl`) is 2 edits and is not matched. This is per the spec (≤1 edit).
+
+---
+
+## Phase 1.5 fix verification (commit `29b3df5`)
+
+**792 tests: 791 passed, 1 failed (an app bug).** The run used in-memory or temp databases, configs and dist folders. The `data/store.db` checksum is unchanged.
+
+### The developer's adjustments to `phase15-tester.test.js`: all legitimate
+
+Only 4 places were changed, and each follows a lead decision.
+
+1. **Global cap → global slowdown (decision 2).** 10 wrong tries from 5 IPs now give a new IP 429 with `Retry-After ≤ 1`, and a correct login 1 s later gives 200. The per-IP 5-minute block tests are unchanged.
+2. **Barcodes (decision 11).**
+   - The JSON number `9312345678901` moved from "normalized" to "400", and `ß12` was added to the 400 list.
+   - The other normalization and rejection cases are unchanged.
+3. **Migration test.** The expected versions now come from `migrations`, because v3 was added. The data-intact assertions are unchanged.
+4. **Scan (decision 12).** The 2001-character "400" case was removed because long text is now truncated. A replacement test is in my new file.
+
+Nothing else was weakened. **The spaced-code test (`T N T - 0 0 4`) now passes.**
+
+### New regression tests (`tests/phase15-fix-tester.test.js`, 30 tests)
+
+- **Parallel login burst:**
+  - 60 parallel wrong PINs from one IP give at most 5 PIN checks (401). The rest get 429 in the standard error shape with `Retry-After`.
+  - After that the IP is blocked for about 5 minutes (Retry-After between 200 and 300).
+  - Another IP is only slowed down: it logs in 15 s later.
+  - 20 parallel right PINs only ever get 200 or 429.
+- **Scan throttle:**
+  - The 31st request in a minute from one IP gets 429, with `Retry-After` equal to `details.retryAfterSeconds`. Invalid bodies count towards the 30.
+  - Other IPs are unaffected, and the throttled IP works again after a minute.
+  - Text over 2000 characters gets 200, and words past character 2000 are ignored.
+- **Leading-zero barcodes:**
+  - `12345678905`, `0012345678905` and `0 1234 5678 905` give 409 naming the owner, on POST and on PUT.
+  - The owner can re-send its barcode without the zero.
+  - Search with the shorter form, and scan with either form, find the item.
+  - Import gives a warning and leaves the owner untouched.
+- **Damaged `config.json`:** `null`, `42`, `"text"`, `[]`, `{broken` and an empty file all give 503 "damaged" (never "not set") on login, status and writes. Reads still work.
+- **Dotted page paths:**
+  - `/items/1.5`, `/racks/R03.B`, `/v1.2/page`, `/search.results`, `/items/TNT-004.v2` and `/x.php` get `index.html`.
+  - Missing `.js`, `.css`, `.traineddata`, `.html`, `.PNG` and `.wasm` files get a plain-text 404.
+
+### Failure: app bug
+
+**PF-1 (low/medium): search with a leading zero doesn't find a barcode stored without it.** The test is "search: the scanned UPC with its leading zero finds an item whose Excel barcode lost the zero".
+
+- **Setup:** item `XL-1` has barcode `98765432105`, i.e. Excel dropped the leading zero of UPC `098765432105`.
+- **Request:** `GET /api/items?q=098765432105`.
+- **Expected:** `["XL-1"]`. The spec says leading zeros are ignored "for 409s, search ranking and scan matching".
+- **Actual:** `[]`. A query with extra zeros (`0012345678905` for a stored `012345678905`) also finds nothing.
+
+**Cause.** In `listItems` (`src/services/items.js`), the rank clause compares `ltrim(barcode,'0') = ltrim(@bc,'0')`. But the WHERE filter only does substring matching, so the row is excluded before it can be ranked. Scan and 409 handle this correctly; only the search box misses it.
+
+**Fix.** Add `OR (barcode IS NOT NULL AND ltrim(barcode,'0') = ltrim(@bc,'0'))` to the WHERE clause, the same way the coordinate match is OR-ed in.

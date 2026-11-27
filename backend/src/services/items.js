@@ -219,19 +219,24 @@ export function listItems(db, { q, category, rack, condition, unlocated } = {}) 
     params.bc = query.replace(/\s+/g, '').toUpperCase();
     params.loc = null;
     const whole = asCoordinate(query);
+    const textMatch = [];
     if (whole) {
       params.loc = whole.locationCode;
-      where.push(`(${locationMatch(whole, params, 'w')} OR ${contains(TEXT_FIELDS, 'ql')})`);
+      textMatch.push(`(${locationMatch(whole, params, 'w')} OR ${contains(TEXT_FIELDS, 'ql')})`);
     } else {
       const tokens = [...new Set(ql.split(' '))]; // q is at most 200 chars, so this stays small
       tokens.forEach((t, i) => {
         params[`t${i}`] = t;
         const loc = asCoordinate(t);
-        where.push(loc
+        textMatch.push(loc
           ? `(${locationMatch(loc, params, `c${i}`)} OR ${contains(TEXT_FIELDS, `t${i}`)})`
           : contains([...TEXT_FIELDS, 'location_code'], `t${i}`));
       });
     }
+    // A barcode typed with (or without) the leading zeros Excel tends to drop still finds the item,
+    // using the same leading-zero-insensitive rule as the ranking, uniqueness check and scan.
+    const barcodeMatch = `(barcode IS NOT NULL AND ltrim(@bc, '0') <> '' AND ltrim(barcode, '0') = ltrim(@bc, '0'))`;
+    where.push(`((${textMatch.join(' AND ')}) OR ${barcodeMatch})`);
     rankSelect = `, CASE
         WHEN fold(code) = @ql OR (barcode IS NOT NULL AND ltrim(barcode, '0') = ltrim(@bc, '0')) THEN 0
         WHEN @loc IS NOT NULL AND location_code = @loc THEN 1
