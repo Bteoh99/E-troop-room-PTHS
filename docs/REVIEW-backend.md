@@ -611,3 +611,69 @@ JavaScript Runtime" to the troubleshooting.
 
 Everything else is solid: token design, write gating, static serving, headers, migration and backup
 rotation all held up under direct testing.
+
+---
+
+## Phase 1.5 verification (commit `29b3df5`)
+
+How I checked:
+- I re-ran the P1 and P3 reproductions against a fresh server (`PORT=3101`, temporary DB,
+  `CONFIG_PATH` and `BACKUP_DIR`; stopped and deleted afterwards).
+- I read every change in `windows/`, `rateLimit.js`, `windowLimiter.js`, `scan.js` and migration v3.
+- I ran the vitest suite: 791 of 792 tests pass. The one failure is in the tester's **uncommitted**
+  `tests/phase15-fix-tester.test.js` ("search: the scanned UPC with its leading zero…"). I could **not**
+  reproduce it through `listItems`: `q=098765432105` finds the item stored as `98765432105`. It probably
+  depends on that file's fixtures. The tester should confirm before it counts as a bug.
+- Windows points were checked by reading only. They are marked "needs Windows verification".
+
+| # | Status | Evidence |
+|---|---|---|
+| P1 login burst | **Fixed** | 200 parallel logins → 4 × 401 and 196 × 429 (immediate "at once" message); the correct PIN was **not** found. 1,000 parallel → 4 checks and 996 × 429 in 0.8 s. Sequential: 5 × 401, then a 429 block. Each attempt is now reserved before scrypt (`begin`/`done` in `try/finally`, so nothing leaks on errors). |
+| P2 SYSTEM code / data readable | **Fixed** (needs Windows verification) | `Protect-AppFolder`: owner Administrators; inheritance removed; SYSTEM and Admins Full, Users RX; children `/reset`; `backend\data` SYSTEM/Admins only. The approach is correct. On a real laptop, check that `icacls /setowner *S-1-5-32-544` accepts the `*SID` form, and that `/reset` with `root\*` also covers the hidden `.git` folder. |
+| P3 numeric/short codes | **Fixed** | Appliance label text gives `TNT-004` 1.0. `2024` only gets 0.35 (whole word). `220` and `220-240V` give no code match. `B O I L` gives no match. `OIL` / `SOS` / `ZOO` give no code match. `Whistle 505` → 0.65, a legitimate whole-word match. `COLEMAN SUNDOME 4P` ranks "Sundome 4P" above "Sundome 4". Spaced `T N T - 0 0 4` and `tnt004` → 1.0. |
+| P4 damaged config | **Fixed** | An empty `config.json` → 503 on login **and** status. `--check` exits 2. `set-pin` without `--force` refuses with a clear hint. `--force` repairs it and keeps `config.json.broken-<time>`. The new PIN works immediately. Nothing is logged as a crash. |
+| P5 global lock-out | **Fixed** | The global cap is now a slowdown (bucket of 10, refills 1/s). Simulated: 250 hopping IPs over 5 minutes → 309 checks, and a leader on a fresh IP waits about 1 s, not 5 minutes. |
+| P6 update/start flow | **Fixed** (needs Windows verification) | `update.ps1` uses try/catch/finally and always runs `Start-StoreRoomTask`, then says honestly whether the app is running. `start-app`, `set-pin`, `settings` and `backup-now` are elevated helpers, and the guide uses them. The restore procedure ends with `start-app.bat`. |
+| P7 scan cost | **Fixed** | The index is cached and invalidated via `total_changes()` + `data_version`. Requests are limited to 30/min per IP: the 26th quick request got 429 with `Retry-After: 60`. |
+| P8 SYSTEM PATH node | **Fixed** (needs Windows verification) | `Get-SystemNodePath` refuses `C:\Users\…` and `AppData` paths. `node-path.txt` is written with `[IO.File]::WriteAllText` (UTF-8 without BOM, so `set /p` reads it cleanly). `start.bat` uses only that path, quoted, plus an absolute `PING.EXE`, and logs and exits if the path is missing. |
+| P9 dry/real barcode | **Fixed** | According to the spec and the code, barcode ownership is planned once for both runs. The tests cover it, and I did not re-test it by hand. |
+| P10 firewall | **Fixed** (needs Windows verification) | `-RemoteAddress LocalSubnet` was added. Block rules for node.exe are detected with `Get-NetFirewallApplicationFilter \| Get-NetFirewallRule` (PS 5.1 pipeline), and removed only after a Y/N prompt. |
+| N1 / N2 / N3 | **Fixed** | The `--pin` warning is in `--help`. `token + "!"` → 401 (canonical signature only). A barcode sent as a number → 400, and `ß12` → 400. |
+
+### New findings
+
+#### V1 (Minor) — Migration v3 fails on a v2 database where two barcodes differ only by leading zeros, so the server cannot start
+`backend/src/db/migrations.js` (v3)
+
+v2 allowed `012345678905` on item A and `12345678905` on item B. v3 creates a UNIQUE index on
+`ltrim(barcode,'0')` without cleaning up first. **Verified:** on such a database, `openDb` throws
+`SQLITE_CONSTRAINT_UNIQUE … idx_items_barcode_key`. The transaction rolls back, so no data is lost.
+But `start.bat` then restarts a crashing server every 10 s, and phones can't connect.
+
+It's Minor only because v2 has probably not been deployed anywhere. If any laptop ran v2 with
+imported barcodes, it becomes Major.
+
+**Fix.** Before `CREATE UNIQUE INDEX` in v3, keep the barcode on the lowest id and clear it on the
+others, recording it in their notes. For example:
+`UPDATE items SET notes = trim(notes || ' [duplicate barcode ' || barcode || ' removed]'), barcode = NULL WHERE barcode IS NOT NULL AND id NOT IN (SELECT MIN(id) FROM items WHERE barcode IS NOT NULL GROUP BY ltrim(barcode,'0'))`.
+
+#### V2 (Nit) — Leftover login risk with IP hopping
+With the global bucket at 1 wrong try per second, an attacker who can switch between many LAN IPv4
+addresses still gets about 3,600 tries per hour. A 4-digit PIN is then found within about 3 hours;
+a 6-digit PIN would take about 12 days. This is acceptable, given the 6-digit recommendation in the
+guide. Consider making 6 digits the minimum in `set-pin`, and still accepting existing 4-digit PINs.
+
+#### V3 (Nit) — `settings.ps1` sends the user to `install.bat` after a port change
+`install.bat` re-runs the full install (`npm ci` + build, which needs internet) only to update the
+firewall rule. `settings.ps1` could recreate the rule itself with the same `New-NetFirewallRule` call.
+
+### Verdict
+**Approve for deployment, after V1 and a check on a real Windows 10 laptop.** All of P1–P10 are
+fixed. P1 and P3 held up against the original reproductions. The Windows changes are sound and
+PowerShell 5.1 compatible as far as can be judged by reading. Before go-live, on a real Windows 10
+laptop:
+- run `install.bat` twice (to check it can be re-run safely);
+- confirm with `icacls C:\eTroop` and `icacls C:\eTroop\backend\data` that a standard user cannot
+  write the app or read its data;
+- reboot without logging in and open the app from a phone;
+- run `update.bat` once with the internet unplugged, to see the failure path.
