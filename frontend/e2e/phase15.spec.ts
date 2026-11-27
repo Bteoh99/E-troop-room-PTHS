@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { leaderHeaders } from './leader';
 
 // Phase 1.5 end-to-end checks (SPEC section F). Parts that need backend Phase 1.5 endpoints
 // skip themselves with a clear reason while the backend doesn't have them yet.
@@ -59,6 +60,7 @@ test.describe('scan', () => {
     );
     const code = `E2E-SCAN-${info.project.name}-${Date.now()}`.toUpperCase();
     const created = await request.post('/api/items', {
+      headers: leaderHeaders(),
       data: { code, name: 'Dome tent (scan test)', brand: 'Coleman', model: 'Sundome 4P', locationCode: 'R05-C-3' },
     });
     expect(created.status()).toBe(201);
@@ -74,7 +76,7 @@ test.describe('scan', () => {
       await expect(card.getByTestId('location-badge')).toContainText('R05-C-3');
       await expect(card).toContainText('Matched on:');
     } finally {
-      await request.delete(`/api/items/${item.id}`);
+      await request.delete(`/api/items/${item.id}`, { headers: leaderHeaders() });
     }
   });
 });
@@ -93,7 +95,7 @@ test.describe('leader mode', () => {
     await dialog.getByLabel('PIN').fill('0000');
     await dialog.getByRole('button', { name: 'Unlock' }).click();
     await expect(dialog.getByText(/That PIN isn't right/)).toBeVisible();
-    await dialog.getByLabel('PIN').fill(process.env.E2E_PIN ?? '2468');
+    await dialog.getByLabel('PIN').fill(process.env.E2E_PIN ?? '246810');
     await dialog.getByRole('button', { name: 'Unlock' }).click();
     await expect(page).toHaveURL(/\/items\/new$/);
     await expect(page.getByTestId('leader-button')).toHaveAccessibleName(/Leader mode on/);
@@ -103,11 +105,17 @@ test.describe('leader mode', () => {
   });
 });
 
-test('needs a location: type a location, Enter saves it and moves to the next item', async ({ page, request }, info) => {
+test('needs a location: type a location, Enter saves it and moves to the next item', async ({
+  page,
+  request,
+}, info) => {
   const stamp = `${info.project.name}-${Date.now()}`.toUpperCase();
   const ids: number[] = [];
   for (const n of ['A', 'B']) {
-    const res = await request.post('/api/items', { data: { code: `E2E-LOC-${n}-${stamp}`, name: `Unlocated ${n} ${stamp}` } });
+    const res = await request.post('/api/items', {
+      headers: leaderHeaders(),
+      data: { code: `E2E-LOC-${n}-${stamp}`, name: `Unlocated ${n} ${stamp}` },
+    });
     expect(res.status()).toBe(201);
     ids.push(((await res.json()) as { id: number }).id);
   }
@@ -123,6 +131,6 @@ test('needs a location: type a location, Enter saves it and moves to the next it
     const saved = (await (await request.get(`/api/items/${ids[0]}`)).json()) as { locationCode: string };
     expect(saved.locationCode).toBe('R04-D-6');
   } finally {
-    for (const id of ids) await request.delete(`/api/items/${id}`);
+    for (const id of ids) await request.delete(`/api/items/${id}`, { headers: leaderHeaders() });
   }
 });

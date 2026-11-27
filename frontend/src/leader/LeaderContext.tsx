@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError, api } from '../api/client';
-import { clearToken, getToken, setToken, subscribeToken } from '../lib/auth';
+import { clearToken, getToken, msUntilExpiry, setToken, subscribeToken } from '../lib/auth';
+import { announce } from '../lib/routeFocus';
 import { PinDialog, type PinDialogMode } from './PinDialog';
 
 /** Thrown by runAsLeader when the user closes the PIN dialog instead of unlocking. */
@@ -15,9 +16,12 @@ export function isLeaderCancelled(err: unknown): err is LeaderCancelledError {
   return err instanceof LeaderCancelledError;
 }
 
-/** The 403 the server sends when no PIN has been set on the laptop yet. */
-function isSetupNeeded(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 403;
+/** 403: no PIN set on the laptop yet. 503: the laptop's leader settings file is damaged. */
+function setupProblem(err: unknown): PinDialogMode | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status === 403) return 'setup';
+  if (err.status === 503) return 'damaged';
+  return null;
 }
 
 interface LeaderApi {
@@ -33,7 +37,12 @@ interface LeaderApi {
   /** Opens the PIN dialog (no follow-up action). */
   unlock: () => void;
   lock: () => void;
+  /** Shown to leaders after unlocking with an old short PIN. */
+  pinNotice: string | null;
+  dismissPinNotice: () => void;
 }
+
+export const SHORT_PIN_NOTICE = 'Please ask the quartermaster to set a 6-digit PIN (the current one is shorter).';
 
 const LeaderContext = createContext<LeaderApi | null>(null);
 
@@ -45,9 +54,19 @@ interface DialogState {
 export function LeaderProvider({ children }: { children: ReactNode }) {
   const [leader, setLeader] = useState(() => getToken() !== null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [pinNotice, setPinNotice] = useState<string | null>(null);
   const waiters = useRef<((ok: boolean) => void)[]>([]);
 
   useEffect(() => subscribeToken(() => setLeader(getToken() !== null)), []);
+
+  // Turn the button back to 🔒 when the token's 30 days run out while the app is open.
+  useEffect(() => {
+    if (!leader) return;
+    const ms = msUntilExpiry();
+    if (ms === null) return;
+    const t = window.setTimeout(() => setLeader(getToken() !== null), Math.min(ms + 1000, 2 ** 31 - 1));
+    return () => window.clearTimeout(t);
+  }, [leader]);
 
   // Ask the server whether the stored token is still good (PIN changed, secret rotated, expired).
   useEffect(() => {
@@ -98,8 +117,9 @@ export function LeaderProvider({ children }: { children: ReactNode }) {
           }
           return fn();
         }
-        if (isSetupNeeded(err)) {
-          await open('setup');
+        const problem = setupProblem(err);
+        if (problem) {
+          await open(problem);
           throw new LeaderCancelledError();
         }
         throw err;
@@ -114,9 +134,15 @@ export function LeaderProvider({ children }: { children: ReactNode }) {
       requireLeader,
       runAsLeader,
       unlock: () => void open('pin'),
-      lock: () => clearToken(),
+      lock: () => {
+        clearToken();
+        setPinNotice(null);
+        announce('Leader mode off.');
+      },
+      pinNotice,
+      dismissPinNotice: () => setPinNotice(null),
     }),
-    [leader, open, requireLeader, runAsLeader],
+    [leader, open, requireLeader, runAsLeader, pinNotice],
   );
 
   return (
@@ -128,9 +154,17 @@ export function LeaderProvider({ children }: { children: ReactNode }) {
           reason={dialog.reason}
           onUnlocked={(token, expiresAt) => {
             setToken(token, expiresAt);
+            announce('Leader mode on.');
             settle(true);
+            // Old 4–5 digit PIN? Nudge leaders to have it changed (doesn't block anything).
+            Promise.resolve()
+              .then(() => api.authStatus())
+              .then((status) => {
+                if (status && typeof status === 'object' && status.pinTooShort) setPinNotice(SHORT_PIN_NOTICE);
+              })
+              .catch(() => {});
           }}
-          onSetupNeeded={() => setDialog({ mode: 'setup' })}
+          onSetupNeeded={(mode) => setDialog({ mode })}
           onCancel={() => settle(false)}
         />
       )}

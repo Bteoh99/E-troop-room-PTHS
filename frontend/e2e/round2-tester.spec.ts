@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, test, type APIRequestContext, type Page, type TestInfo } from '@playwright/test';
+import { leaderHeaders } from './leader';
 
 // Round-2 regression + "try to break it" e2e (frontend tester). Runs in desktop and mobile-360.
 // Each test creates its own data with codes unique to the project + run (both projects share one DB).
@@ -12,7 +13,7 @@ const tag = (info: TestInfo) => `${info.project.name === 'mobile-360' ? 'M' : 'D
 const wideRack = (info: TestInfo) => (info.project.name === 'mobile-360' ? 'R09' : 'R08');
 
 async function create(request: APIRequestContext, body: Record<string, unknown>): Promise<{ id: number }> {
-  const res = await request.post('/api/items', { data: body });
+  const res = await request.post('/api/items', { data: body, headers: leaderHeaders() });
   expect(res.status(), await res.text()).toBe(201);
   return (await res.json()) as { id: number };
 }
@@ -53,7 +54,7 @@ test.describe('rack diagram with many bins', () => {
     const b30 = (await page.getByTestId('rack-diagram').locator('[data-shelf="B"] [data-bin="30"]').boundingBox())!;
     expect(b30.width).toBeGreaterThanOrEqual(24);
 
-    for (const c of [...created, target]) await request.delete(`/api/items/${c.id}`);
+    for (const c of [...created, target]) await request.delete(`/api/items/${c.id}`, { headers: leaderHeaders() });
   });
 
   test('bin 0 (accepted as R0x-A-0) is still highlighted on the detail page', async ({ page, request }, info) => {
@@ -61,7 +62,7 @@ test.describe('rack diagram with many bins', () => {
     await page.goto(`/items/${item.id}`);
     await expect(page.getByTestId('location-badge').first()).toContainText('R06-A-0');
     await expect(page.getByTestId('rack-diagram').locator('[data-highlighted="true"]')).toHaveCount(1);
-    await request.delete(`/api/items/${item.id}`);
+    await request.delete(`/api/items/${item.id}`, { headers: leaderHeaders() });
   });
 });
 

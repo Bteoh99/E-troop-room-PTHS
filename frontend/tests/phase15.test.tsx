@@ -87,9 +87,9 @@ describe('Leader mode', () => {
     expect(input).toHaveAttribute('inputmode', 'numeric');
     expect(input).toHaveAttribute('autocomplete', 'off');
     expect(input).toHaveFocus();
-    await user.type(input, '2468');
+    await user.type(input, '246810');
     await user.click(within(dialog).getByRole('button', { name: 'Unlock' }));
-    expect(m.login).toHaveBeenCalledWith('2468');
+    expect(m.login).toHaveBeenCalledWith('246810');
     await waitFor(() => expect(currentLocation()).toBe('/items/new'));
     expect(getToken()).toBe('test-leader-token');
     expect(screen.getByTestId('leader-button')).toHaveAccessibleName(/Leader mode on/);
@@ -112,7 +112,7 @@ describe('Leader mode', () => {
     expect(getToken()).toBeNull();
   });
 
-  it('rejects a PIN that is not 4–8 digits without calling the server', async () => {
+  it('rejects a PIN that is too short without calling the server (PINs are 6–8 digits)', async () => {
     const user = userEvent.setup();
     renderApp('/', undefined, { leader: false });
     await user.click(screen.getByTestId('leader-button'));
@@ -120,7 +120,7 @@ describe('Leader mode', () => {
     await user.type(within(dialog).getByLabelText('PIN'), '12a');
     expect(within(dialog).getByLabelText('PIN')).toHaveValue('12');
     await user.click(within(dialog).getByRole('button', { name: 'Unlock' }));
-    expect(within(dialog).getByText('The PIN is 4 to 8 digits.')).toBeInTheDocument();
+    expect(within(dialog).getByText('The PIN is 6 to 8 digits.')).toBeInTheDocument();
     expect(m.login).not.toHaveBeenCalled();
   });
 
@@ -171,7 +171,7 @@ describe('Leader mode', () => {
     const dialog = await pinDialog();
     expect(dialog).toHaveTextContent(/session has ended/);
     expect(getToken()).toBeNull();
-    await user.type(within(dialog).getByLabelText('PIN'), '2468');
+    await user.type(within(dialog).getByLabelText('PIN'), '246810');
     await user.click(within(dialog).getByRole('button', { name: 'Unlock' }));
     await waitFor(() => expect(m.updateItem).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('Changes saved.')).toBeInTheDocument();
@@ -186,7 +186,7 @@ describe('Leader mode', () => {
     await user.upload(screen.getByLabelText('Excel or CSV file'), new File(['x'], 'a.xlsx'));
     const dialog = await pinDialog();
     expect(m.importFile).not.toHaveBeenCalled();
-    await user.type(within(dialog).getByLabelText('PIN'), '2468');
+    await user.type(within(dialog).getByLabelText('PIN'), '246810');
     await user.click(within(dialog).getByRole('button', { name: 'Unlock' }));
     await waitFor(() => expect(m.importFile).toHaveBeenCalledWith(expect.any(File), true));
     expect(await screen.findByTestId('import-counts')).toBeInTheDocument();
@@ -226,6 +226,8 @@ describe('Scan', () => {
   });
 
   it('photo → barcode miss → OCR text → matches shown as result cards with "Matched on"', async () => {
+    const thumb = document.createElement('canvas');
+    engine.prepareImage.mockResolvedValue({ canvas: document.createElement('canvas'), width: 1, height: 1, thumbnail: thumb });
     engine.readText.mockImplementation(async (_c: unknown, progress?: (s: string, f: number) => void) => {
       progress?.('reading', 0.5);
       return 'COLEMAN\nSUNDOME 4P\nMade in China';
@@ -239,7 +241,8 @@ describe('Scan', () => {
     const card = screen.getByTestId('item-card');
     expect(within(card).getByTestId('location-badge')).toHaveTextContent('R03-B-2');
     expect(card).toHaveTextContent('Matched on: brand, model');
-    expect(screen.getByRole('img', { name: 'Your photo' })).toHaveAttribute('src', 'blob:photo');
+    // P6: the thumbnail is the small canvas made from the downscaled photo (no second decode of the original).
+    expect(screen.getByRole('img', { name: 'Your photo' }).querySelector('canvas')).toBe(thumb);
     expect(screen.getByLabelText(/Fix any mistakes/)).toHaveValue('COLEMAN\nSUNDOME 4P\nMade in China');
   });
 

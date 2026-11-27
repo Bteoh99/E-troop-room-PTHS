@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test';
+import { leaderHeaders } from './leader';
 
 // Developer-added regression checks for the round-2 review (M1, M2, m1).
 
 test('M2: on a rack with many bins the highlighted bin stays readable and in view', async ({ page, request }, info) => {
   const code = `E2E-BIN-${info.project.name}-${Date.now()}`;
   const res = await request.post('/api/items', {
+    headers: leaderHeaders(),
     data: { code, name: 'Wide rack test item', locationCode: 'R07-A-14' },
   });
   expect(res.status()).toBe(201);
@@ -27,7 +29,7 @@ test('M2: on a rack with many bins the highlighted bin stays readable and in vie
     );
     expect(overflow).toBeLessThanOrEqual(0);
   } finally {
-    await request.delete(`/api/items/${item.id}`);
+    await request.delete(`/api/items/${item.id}`, { headers: leaderHeaders() });
   }
 });
 
@@ -42,6 +44,7 @@ test('m1: the Search tab clears an active search', async ({ page }) => {
 test('M1: after deleting, Back does not land on a "not found" page', async ({ page, request }, info) => {
   const code = `E2E-DEL-${info.project.name}-${Date.now()}`;
   const res = await request.post('/api/items', {
+    headers: leaderHeaders(),
     data: { code, name: 'Delete history test', locationCode: 'R02-A-1' },
   });
   const item = (await res.json()) as { id: number };
@@ -62,6 +65,7 @@ test('Reviewer R2-1: on the rack page a wide rack shows its first occupied bin a
   const ids: number[] = [];
   for (const [i, loc] of ['R08-A-20', 'R08-B-24', 'R08-C-22'].entries()) {
     const res = await request.post('/api/items', {
+      headers: leaderHeaders(),
       data: { code: `E2E-WIDE-${i}-${stamp}`, name: `Wide ${i}`, locationCode: loc },
     });
     ids.push(((await res.json()) as { id: number }).id);
@@ -77,6 +81,6 @@ test('Reviewer R2-1: on the rack page a wide rack shows its first occupied bin a
     expect(box.x + box.width).toBeLessThanOrEqual(vw);
     if (vw < 600) await expect(diagram.getByText('Swipe sideways to see every bin')).toBeVisible();
   } finally {
-    for (const id of ids) await request.delete(`/api/items/${id}`);
+    for (const id of ids) await request.delete(`/api/items/${id}`, { headers: leaderHeaders() });
   }
 });

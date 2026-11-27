@@ -45,6 +45,8 @@ export function LocatePage() {
   const [saving, setSaving] = useState<number | null>(null);
   const [prefix, setPrefix] = useState('');
   const inputs = useRef(new Map<number, HTMLInputElement>());
+  const emptyHeading = useRef<HTMLHeadingElement>(null);
+  const focusEmpty = useRef(false);
   const timers = useRef<number[]>([]);
   const prefixId = useId();
   const uid = useId();
@@ -54,6 +56,13 @@ export function LocatePage() {
   }, [list.status, list.data]);
 
   useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
+
+  useEffect(() => {
+    if (items?.length === 0 && focusEmpty.current) {
+      focusEmpty.current = false;
+      emptyHeading.current?.focus();
+    }
+  }, [items]);
 
   const prefixRack = normalizeRack(prefix);
   const prefixInvalid = prefix.trim() !== '' && !prefixRack;
@@ -89,7 +98,10 @@ export function LocatePage() {
     const index = visible.findIndex((i) => i.id === item.id);
     const next = visible[index + 1] ?? visible[index - 1];
     if (next) inputs.current.get(next.id)?.focus();
-    announce(`Saved ${item.code} at ${loc.locationCode}.${next ? ` Next: ${next.name}.` : ''}`);
+    else focusEmpty.current = true; // focus the "Every item has a location" heading once it shows
+    announce(
+      `Saved ${item.code} at ${loc.locationCode}.${next ? ` Next: ${next.name}.` : ' Every item has a location.'}`,
+    );
 
     setLeaving((prev) => new Set(prev).add(item.id));
     const remove = () => {
@@ -152,7 +164,7 @@ export function LocatePage() {
 
       {items &&
         (items.length === 0 ? (
-          <EmptyState title="Every item has a location" icon="🎉">
+          <EmptyState title="Every item has a location" icon="🎉" titleRef={emptyHeading}>
             <p>Nothing left to do here.</p>
             <Link to="/map" className="btn btn--primary">
               View the map

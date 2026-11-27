@@ -27,7 +27,7 @@ Open http://localhost:5173. To point the proxy at another backend: `BACKEND_URL=
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Vitest (jsdom + Testing Library), files in `tests/**/*.test.ts(x)` |
 | `npm run ocr-assets` | Copy the offline OCR files into `public/ocr/` (also runs automatically before `dev`/`build`). |
-| `npm run e2e` | Playwright (`e2e/`), trace off. The e2e backend gets its own temp `CONFIG_PATH` and PIN `E2E_PIN` (default 2468, set with `npm run set-pin`). `e2e/global-setup.ts` logs in once, so tests run in leader mode; tests that need the locked state use an empty storageState. Always starts its **own** backend on :3901 with a brand-new temp DB (`npm run seed && npm start` in `../backend`) and Vite on :5901; it never reuses a running server, so it can't write into real data. Override with `E2E_BACKEND_PORT`, `E2E_WEB_PORT`, `E2E_DB_PATH` (scratch file only); `E2E_NO_SERVER=1` + `E2E_BASE_URL` to use servers you started yourself. Projects: `desktop` (1280×800) and `mobile-360`. |
+| `npm run e2e` | Playwright (`e2e/`), trace off. The e2e backend gets its own temp `CONFIG_PATH` and PIN `E2E_PIN` (default 246810, set with `npm run set-pin`). `e2e/global-setup.ts` logs in once and gives the token to the app **only** through the storage state (localStorage), so tests run in leader mode. API helpers in specs send it explicitly with `headers: leaderHeaders()` from `e2e/leader.ts`; there is no global `extraHTTPHeaders`, which would also go on every browser request and hide the app's own token handling. Tests that need the locked state use an empty storageState. For a production-mode run against a backend serving a build: `E2E_NO_SERVER=1 E2E_BASE_URL=http://localhost:<port> E2E_PROD=1 npx playwright test`. Always starts its **own** backend on :3901 with a brand-new temp DB (`npm run seed && npm start` in `../backend`) and Vite on :5901; it never reuses a running server, so it can't write into real data. Override with `E2E_BACKEND_PORT`, `E2E_WEB_PORT`, `E2E_DB_PATH` (scratch file only); `E2E_NO_SERVER=1` + `E2E_BASE_URL` to use servers you started yourself. Projects: `desktop` (1280×800) and `mobile-360`. |
 
 Chromium is preinstalled (`PLAYWRIGHT_BROWSERS_PATH`); never run `playwright install`.
 `@playwright/test` is pinned to the preinstalled browser build (1.63.0).
@@ -52,7 +52,10 @@ Navigation is a bottom tab bar on phones and a top bar from 768 px.
   - When locked, those buttons are still shown; tapping one asks for the PIN first, then carries on.
   - The token is kept in `localStorage` under `etroop.leaderToken`. Every access is wrapped in try/catch, with an in-memory fallback.
   - A 401 clears the token, asks for the PIN and retries the action once.
-  - A 429 shows "Too many wrong tries — wait 5 minutes".
+  - A 429 uses the server's `Retry-After`: "Please wait a moment" for the short "too many at once" limit, otherwise "Too many wrong tries — wait N minutes".
+  - A 503 (damaged settings file on the laptop) explains how to repair it with `set-pin`.
+  - New PINs are 6–8 digits; an old 4–5 digit PIN still works, and leaders then see a note asking for a 6-digit PIN (`pinTooShort` from `/api/auth/status`).
+  - If the browser can't store the token (full or blocked storage), it is kept in memory for the session. Locking in another tab locks this one too.
   - A 403 means the PIN hasn't been set up; the dialog explains how to run `set-pin` on the laptop.
   - Code: `src/leader/`, `src/lib/auth.ts`.
 - **Scan** (`/scan`, also the 📷 button next to the search box). The page is lazy-loaded into its own chunk.
@@ -62,6 +65,10 @@ Navigation is a bottom tab bar on phones and a top bar from 768 px.
   4. If there is no barcode match: OCR with **tesseract.js**, fully offline.
   5. `POST /api/scan/match` returns the matches.
   - The recognised text can be edited and searched again.
+  - The reader has time limits (start 45 s, read 60 s). A failed start is never cached, so the next scan retries, and the message names the file that failed (worker, engine or language file).
+  - Leaving the page or starting another scan cancels the read and terminates the worker. The worker is also terminated after 2 idle minutes.
+  - The photo is decoded once, already downscaled where the browser supports it. The thumbnail is drawn from that small copy.
+  - A scan-throttle 429 says how many seconds to wait.
   - Code: `src/scan/` and `src/pages/ScanPage.tsx`.
 - **Offline OCR assets.** `scripts/copy-ocr-assets.mjs` (runs automatically before `dev` and `build`) copies these into `public/ocr/`, so they end up in `dist/ocr/`. Nothing is loaded from a CDN.
   - The Tesseract worker.

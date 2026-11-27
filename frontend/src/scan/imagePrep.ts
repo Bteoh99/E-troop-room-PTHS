@@ -1,5 +1,7 @@
 /** Longest side of the image we work on. Big phone photos (12+ MP) are far too slow for OCR on old phones. */
 export const MAX_SIDE = 1600;
+/** Longest side of the on-screen thumbnail. */
+export const THUMB_SIDE = 240;
 
 export interface PreparedImage {
   /** Greyscale, contrast-stretched, at most MAX_SIDE px on the longest side. */
@@ -8,15 +10,46 @@ export interface PreparedImage {
   height: number;
   /** One luminance byte per pixel (for the barcode reader). */
   grey: Uint8ClampedArray;
+  /** Small copy for the screen (so the 12 MP original is never decoded a second time). */
+  thumbnail?: HTMLCanvasElement;
 }
 
-async function decode(file: Blob): Promise<CanvasImageSource & { width: number; height: number }> {
+export function scaledSize(width: number, height: number, maxSide = MAX_SIDE): { width: number; height: number } {
+  const scale = Math.min(1, maxSide / Math.max(width, height));
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+type Source = CanvasImageSource & { width: number; height: number; close?: () => void };
+
+/** Reads only the image's size (the browser decodes pixels lazily, on draw). */
+function naturalSize(file: Blob): Promise<{ width: number; height: number }> {
+  const url = URL.createObjectURL(file);
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error("This photo couldn't be opened. Try taking it again."));
+    img.src = url;
+  }).finally(() => URL.revokeObjectURL(url));
+}
+
+/**
+ * Decodes the photo ONCE, already downscaled where the browser supports it
+ * (createImageBitmap resize options), respecting the phone's EXIF rotation.
+ */
+async function decodeDownscaled(file: Blob): Promise<Source> {
   if (typeof createImageBitmap === 'function') {
     try {
-      // Respect the phone's EXIF rotation.
-      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const size = await naturalSize(file);
+      const target = scaledSize(size.width, size.height);
+      // Give only the long side: the browser keeps the aspect ratio (also after EXIF rotation).
+      const resize = size.width >= size.height ? { resizeWidth: target.width } : { resizeHeight: target.height };
+      return await createImageBitmap(file, { imageOrientation: 'from-image', resizeQuality: 'medium', ...resize });
     } catch {
-      /* fall back to <img> */
+      try {
+        return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch {
+        /* fall back to <img> */
+      }
     }
   }
   const url = URL.createObjectURL(file);
@@ -31,14 +64,9 @@ async function decode(file: Blob): Promise<CanvasImageSource & { width: number; 
   }
 }
 
-export function scaledSize(width: number, height: number, maxSide = MAX_SIDE): { width: number; height: number } {
-  const scale = Math.min(1, maxSide / Math.max(width, height));
-  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
-}
-
 /** Downscale + greyscale + stretch contrast (helps OCR on dim store-room photos). */
 export async function prepareImage(file: Blob): Promise<PreparedImage> {
-  const source = await decode(file);
+  const source = await decodeDownscaled(file);
   const { width, height } = scaledSize(source.width, source.height);
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -46,7 +74,7 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('This browser cannot process photos.');
   ctx.drawImage(source, 0, 0, width, height);
-  if ('close' in source && typeof source.close === 'function') source.close();
+  source.close?.(); // free the decoded bitmap right away
 
   const image = ctx.getImageData(0, 0, width, height);
   const px = image.data;
@@ -70,5 +98,18 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
     px[i] = px[i + 1] = px[i + 2] = grey[j]!;
   }
   ctx.putImageData(image, 0, 0);
-  return { canvas, width, height, grey };
+
+  const t = scaledSize(width, height, THUMB_SIDE);
+  const thumbnail = document.createElement('canvas');
+  thumbnail.width = t.width;
+  thumbnail.height = t.height;
+  thumbnail.getContext('2d')?.drawImage(canvas, 0, 0, t.width, t.height);
+  return { canvas, width, height, grey, thumbnail };
+}
+
+/** Releases the big working canvas once the scan is done (old phones are short on memory). */
+export function releaseImage(img: PreparedImage | null | undefined): void {
+  if (!img) return;
+  img.canvas.width = 0;
+  img.canvas.height = 0;
 }

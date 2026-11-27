@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode, Ref } from 'react';
 import { ApiError } from '../api/client';
 import { PageHeading } from './PageHeading';
 
@@ -38,12 +38,15 @@ export function EmptyState({
   children,
   icon = '🏕️',
   pageHeading = false,
+  titleRef,
 }: {
   title: string;
   children?: ReactNode;
   icon?: string;
   /** Render the title as the page's <h1> (for whole-page states such as "not found"). */
   pageHeading?: boolean;
+  /** Render the title as a focusable <h2> (so focus can be moved to it, e.g. after the last item is done). */
+  titleRef?: Ref<HTMLHeadingElement>;
 }) {
   return (
     <div className="status status--empty">
@@ -52,6 +55,10 @@ export function EmptyState({
       </span>
       {pageHeading ? (
         <PageHeading className="status__title">{title}</PageHeading>
+      ) : titleRef ? (
+        <h2 ref={titleRef} className="status__title" tabIndex={-1}>
+          {title}
+        </h2>
       ) : (
         <p className="status__title">{title}</p>
       )}

@@ -116,6 +116,8 @@ export interface ApiErrorBody {
 export interface AuthStatus {
   pinSet: boolean;
   leader: boolean;
+  /** The PIN is an old 4–5 digit one (new PINs are 6–8 digits). */
+  pinTooShort?: boolean;
 }
 
 export interface LoginResult {

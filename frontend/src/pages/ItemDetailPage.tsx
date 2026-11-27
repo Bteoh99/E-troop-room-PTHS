@@ -191,14 +191,25 @@ function ItemDetail({ item }: { item: Item }) {
               onClick={(e) => {
                 if (!leader) gated(goEdit)(e);
               }}
+              aria-describedby={leader ? undefined : 'needs-pin-note'}
             >
               {!leader && <span aria-hidden="true">🔒 </span>}Edit item
             </Link>
-            <button type="button" className="btn btn--danger-outline" onClick={gated(() => setConfirmOpen(true))}>
+            <button
+              type="button"
+              className="btn btn--danger-outline"
+              onClick={gated(() => setConfirmOpen(true))}
+              aria-describedby={leader ? undefined : 'needs-pin-note'}
+            >
               {!leader && <span aria-hidden="true">🔒 </span>}
               Delete
             </button>
           </div>
+          {!leader && (
+            <p id="needs-pin-note" className="visually-hidden">
+              Needs the leader PIN
+            </p>
+          )}
         </section>
       </div>
 

@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api/client';
+import { ApiError, api } from '../api/client';
 import type { ScanMatchResponse } from '../api/types';
 import { ItemCard } from '../components/ItemCard';
 import { PageHeading } from '../components/PageHeading';
 import { EmptyState } from '../components/StatusViews';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { waitText } from '../lib/wait';
 import * as engine from '../scan/engine';
 
 type Stage = 'idle' | 'preparing' | 'barcode' | 'ocr-loading' | 'ocr' | 'matching' | 'done' | 'error';
@@ -28,6 +29,27 @@ const MATCHED_ON_LABELS: Record<string, string> = {
   notes: 'notes',
 };
 
+function isAbort(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && 'part' in err && (err as { part?: string }).part === 'cancelled')
+  );
+}
+
+/** Friendly wording for anything that can go wrong during a scan. */
+export function scanErrorText(err: unknown): string {
+  if (err instanceof ApiError && err.status === 429) {
+    const secs = err.retryAfterSeconds;
+    return `Too many scans in a minute — wait ${secs === undefined ? 'a minute' : waitText(secs)}, then try again.`;
+  }
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) {
+    console.warn('[scan] failed:', err);
+    return 'Something went wrong while reading the photo. Try again, or type to search.';
+  }
+  return 'Something went wrong while reading the photo. Try again, or type to search.';
+}
+
 export function matchedOnText(fields: string[]): string {
   return fields.map((f) => MATCHED_ON_LABELS[f] ?? f).join(', ');
 }
@@ -42,29 +64,41 @@ export default function ScanPage() {
 
   const [stage, setStage] = useState<Stage>('idle');
   const [progress, setProgress] = useState<number | null>(null);
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [thumb, setThumb] = useState<HTMLCanvasElement | null>(null);
   const [barcode, setBarcode] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [result, setResult] = useState<ScanMatchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [searchingText, setSearchingText] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  // Free the photo preview when it changes or the page closes.
-  useEffect(() => () => void (photoUrl && URL.revokeObjectURL(photoUrl)), [photoUrl]);
+  // Leaving the page abandons the scan: no match request afterwards, OCR worker stopped.
+  useEffect(
+    () => () => {
+      runId.current++;
+      abortRef.current?.abort();
+    },
+    [],
+  );
 
   async function process(file: File) {
+    abortRef.current?.abort(); // a scan still running is abandoned
+    const controller = new AbortController();
+    abortRef.current = controller;
     const run = ++runId.current;
     const live = () => run === runId.current;
-    setPhotoUrl(URL.createObjectURL(file));
+    setThumb(null);
     setBarcode(null);
     setText('');
     setResult(null);
     setError(null);
     setProgress(null);
+    let img: engine.PreparedImage | null = null;
     try {
       setStage('preparing');
-      const img = await engine.prepareImage(file);
+      img = await engine.prepareImage(file);
       if (!live()) return;
+      setThumb(img.thumbnail ?? null);
 
       setStage('barcode');
       const code = await engine.findBarcode(img);
@@ -82,11 +116,15 @@ export default function ScanPage() {
       }
 
       setStage('ocr-loading');
-      const recognised = await engine.readText(img.canvas, (s, fraction) => {
-        if (!live()) return;
-        setStage(s === 'reading' ? 'ocr' : 'ocr-loading');
-        setProgress(Math.round(fraction * 100));
-      });
+      const recognised = await engine.readText(
+        img.canvas,
+        (s, fraction) => {
+          if (!live()) return;
+          setStage(s === 'reading' ? 'ocr' : 'ocr-loading');
+          setProgress(Math.round(fraction * 100));
+        },
+        controller.signal, // aborted when the user leaves or starts another scan
+      );
       if (!live()) return;
       const cleaned = recognised.replace(/[ \t]+\n/g, '\n').trim();
       setText(cleaned);
@@ -106,9 +144,15 @@ export default function ScanPage() {
       setResult(res);
       setStage('done');
     } catch (err) {
-      if (!live()) return;
-      setError(err instanceof Error ? err.message : 'Something went wrong while reading the photo.');
+      if (!live() || isAbort(err)) return;
+      setError(scanErrorText(err));
       setStage('error');
+    } finally {
+      // The big working canvas is no longer needed (old phones are short on memory).
+      if (img?.canvas) {
+        img.canvas.width = 0;
+        img.canvas.height = 0;
+      }
     }
   }
 
@@ -128,7 +172,7 @@ export default function ScanPage() {
       setResult(await api.scanMatch({ text: t.slice(0, 2000) }));
       setStage('done');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed.');
+      setError(scanErrorText(err));
       setStage('error');
     } finally {
       setSearchingText(false);
@@ -185,9 +229,9 @@ export default function ScanPage() {
         </ul>
       </section>
 
-      {photoUrl && (
+      {(thumb || busy) && (
         <div className="scan-photo">
-          <img src={photoUrl} alt="Your photo" className="scan-photo__img" />
+          {thumb && <CanvasThumb canvas={thumb} />}
           {busy && (
             <div className="scan-progress" role="status" aria-live="polite" data-testid="scan-progress">
               <span className="spinner" aria-hidden="true" />
@@ -256,9 +300,12 @@ export default function ScanPage() {
         <section aria-labelledby={`${textId}-results`}>
           {result.matches.length > 0 ? (
             <>
-              <h2 id={`${textId}-results`} className="results__count" role="status">
-                {result.matches.length === 1 ? 'Found 1 match' : `Found ${result.matches.length} matches`} — best first
-              </h2>
+              <div role="status">
+                <h2 id={`${textId}-results`} className="results__count">
+                  {result.matches.length === 1 ? 'Found 1 match' : `Found ${result.matches.length} matches`} — best
+                  first
+                </h2>
+              </div>
               <ul className="results" data-testid="scan-results">
                 {result.matches.map((m) => (
                   <li key={m.item.id}>
@@ -296,4 +343,19 @@ export default function ScanPage() {
       )}
     </div>
   );
+}
+
+/** Shows the small, already-downscaled copy of the photo (never re-decodes the original). */
+function CanvasThumb({ canvas }: { canvas: HTMLCanvasElement }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    canvas.className = 'scan-photo__canvas';
+    el.replaceChildren(canvas);
+    return () => {
+      el.replaceChildren();
+    };
+  }, [canvas]);
+  return <div ref={box} className="scan-photo__img" role="img" aria-label="Your photo" />;
 }

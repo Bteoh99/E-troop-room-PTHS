@@ -6,7 +6,7 @@ import { expect, test, type APIRequestContext, type Page, type TestInfo } from '
 // leader mode against the real PIN backend, "Needs a location", deep links, and — when E2E_PROD=1 —
 // production-mode checks against the backend serving the built dist.
 
-const PIN = process.env.E2E_PIN ?? '2468';
+const PIN = process.env.E2E_PIN ?? '246810';
 const PROD = process.env.E2E_PROD === '1';
 const RUN = Date.now().toString(36).slice(-5).toUpperCase();
 const tag = (info: TestInfo) => `${info.project.name === 'mobile-360' ? 'M' : 'D'}${RUN}`;

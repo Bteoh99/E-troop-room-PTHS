@@ -35,7 +35,7 @@ const NAV: NavEntry[] = [
 export function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { leader, requireLeader, unlock, lock } = useLeader();
+  const { leader, requireLeader, unlock, lock, pinNotice, dismissPinNotice } = useLeader();
   const [flash, setFlash] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const mainRef = useRef<HTMLElement>(null);
@@ -121,10 +121,33 @@ export function Layout() {
             data-testid="leader-button"
           >
             <span aria-hidden="true">{leader ? '🔓' : '🔒'}</span>
-            <span className="leader-btn__text">{leader ? 'Leader on · Lock' : 'Leader'}</span>
+            {/* Visible words are part of the accessible name (WCAG 2.5.3): "Leader mode on. Lock" / "Leader mode off. …". */}
+            <span className="leader-btn__text">
+              {leader ? (
+                <>
+                  <span className="leader-btn__long">Leader mode </span>on · Lock
+                </>
+              ) : (
+                'Leader'
+              )}
+            </span>
           </button>
         </div>
       </header>
+
+      {pinNotice && (
+        <div className="flash-region">
+          <div className="flash flash--warn" data-testid="pin-notice">
+            <span>
+              <span aria-hidden="true">⚠ </span>
+              {pinNotice}
+            </span>
+            <button type="button" className="flash__close" onClick={dismissPinNotice} aria-label="Dismiss PIN notice">
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flash-region" role="status" aria-live="polite">
         {flash && (

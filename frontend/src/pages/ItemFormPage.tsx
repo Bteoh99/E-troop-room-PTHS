@@ -137,7 +137,7 @@ export function validate(values: FormValues): FieldErrors {
   if ((values.model ?? '').trim().length > LIMITS.model) errors.model = tooLong('model');
   const barcode = normalizeBarcode(values.barcode);
   if (barcode.length > LIMITS.barcode) errors.barcode = tooLong('barcode');
-  else if (/[^A-Za-z0-9]/.test(barcode)) errors.barcode = 'A barcode can only contain letters and digits.';
+  else if (/[^A-Za-z0-9]/.test(barcode)) errors.barcode = 'A barcode can only contain letters and digits (A–Z, 0–9).';
   return errors;
 }
 
@@ -528,13 +528,17 @@ function ItemForm({ item }: { item: Item | null }) {
               id={fid('barcode')}
               value={values.barcode ?? ''}
               onChange={(e) => set('barcode', e.target.value)}
-              placeholder="Shop barcode number"
+              placeholder="e.g. 9555012345678"
               autoComplete="off"
               spellCheck={false}
-              inputMode="numeric"
+              inputMode="text"
+              autoCapitalize="characters"
               aria-invalid={errors.barcode ? true : undefined}
-              aria-describedby={describedBy('barcode')}
+              aria-describedby={describedBy('barcode', `${fid('barcode')}-hint`)}
             />
+            <p id={`${fid('barcode')}-hint`} className="field__hint">
+              The number under the shop barcode. Letters A–Z and digits only (spaces are removed).
+            </p>
             {fieldError('barcode')}
           </div>
 

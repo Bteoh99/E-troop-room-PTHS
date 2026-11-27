@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type APIRequestContext, type Page, type TestInfo } from '@playwright/test';
+import { leaderHeaders } from './leader';
 
 // End-to-end against the real backend (temp DB + seed) and the Vite dev server.
 // Every test runs in both projects (desktop 1280 px, mobile-360) against the SAME database,
@@ -25,7 +26,7 @@ interface ItemJson {
 }
 
 async function createViaApi(request: APIRequestContext, body: Record<string, unknown>): Promise<ItemJson> {
-  const res = await request.post('/api/items', { data: body });
+  const res = await request.post('/api/items', { data: body, headers: leaderHeaders() });
   expect(res.status(), await res.text()).toBe(201);
   return (await res.json()) as ItemJson;
 }

@@ -68,7 +68,7 @@ afterEach(() => {
 const pinDialog = () => screen.findByRole('dialog', { name: /Leader PIN/ });
 const nav = () => screen.getByRole('navigation', { name: 'Main' });
 
-async function enterPin(user: ReturnType<typeof userEvent.setup>, pin = '2468') {
+async function enterPin(user: ReturnType<typeof userEvent.setup>, pin = '246810') {
   const dialog = await pinDialog();
   await user.type(within(dialog).getByLabelText('PIN'), pin);
   await user.click(within(dialog).getByRole('button', { name: 'Unlock' }));
@@ -84,7 +84,7 @@ describe('leader mode: every gated action, locked → PIN → action continues',
     expect(currentLocation()).toBe('/');
     await enterPin(user);
     await screen.findByRole('heading', { level: 1, name: 'Add an item' });
-    expect(m.login).toHaveBeenCalledWith('2468');
+    expect(m.login).toHaveBeenCalledWith('246810');
     expect(getToken()).toBe('test-leader-token');
   });
 
@@ -236,7 +236,8 @@ describe('PIN dialog', () => {
     renderApp('/', undefined, { leader: false });
     await user.click(screen.getByTestId('leader-button'));
     await enterPin(user, '12');
-    expect(await screen.findByRole('alert')).toHaveTextContent('The PIN is 4 to 8 digits.');
+    // Lead decision (fix round): PINs are now 6–8 digits.
+    expect(await screen.findByRole('alert')).toHaveTextContent('The PIN is 6 to 8 digits.');
     expect(m.login).not.toHaveBeenCalled();
   });
 
@@ -252,7 +253,7 @@ describe('PIN dialog', () => {
     expect(input).toHaveFocus();
     expect(input).toHaveAttribute('aria-invalid', 'true');
     expect(currentLocation()).toBe('/items/7');
-    await enterPin(user, '2468');
+    await enterPin(user, '246810');
     await screen.findByRole('heading', { level: 1, name: 'Edit TNT-004' });
   });
 
@@ -261,7 +262,7 @@ describe('PIN dialog', () => {
     const user = userEvent.setup();
     renderApp('/items/7', undefined, { leader: false });
     await user.click(await screen.findByRole('button', { name: /Delete/ }));
-    const dialog = await enterPin(user, '2468');
+    const dialog = await enterPin(user, '246810');
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Too many wrong tries — wait 5 minutes/);
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog')).toBeNull();

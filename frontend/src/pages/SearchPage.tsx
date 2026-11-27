@@ -92,7 +92,7 @@ export function SearchPage() {
             id={inputId}
             type="search"
             className="search__input"
-            placeholder="Search tent, TNT-004, R03…"
+            placeholder="Tent, TNT-004, R03…"
             value={text}
             onChange={(e) => setText(e.target.value)}
             autoFocus

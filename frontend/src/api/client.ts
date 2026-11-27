@@ -18,13 +18,27 @@ import type {
 export class ApiError extends Error {
   readonly status: number;
   readonly details?: unknown;
+  /** Seconds to wait before retrying (429/503): from the Retry-After header or details.retryAfterSeconds. */
+  readonly retryAfterSeconds?: number;
 
-  constructor(message: string, status: number, details?: unknown) {
+  constructor(message: string, status: number, details?: unknown, retryAfterSeconds?: number) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.details = details;
+    const fromDetails = (details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+    const secs = retryAfterSeconds ?? (typeof fromDetails === 'number' ? fromDetails : undefined);
+    if (secs !== undefined && Number.isFinite(secs) && secs >= 0) this.retryAfterSeconds = Math.ceil(secs);
   }
+}
+
+/** Parses a Retry-After header given in seconds (the HTTP-date form is converted too). */
+export function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const secs = Number(value.trim());
+  if (Number.isFinite(secs)) return Math.max(0, secs);
+  const when = Date.parse(value);
+  return Number.isFinite(when) ? Math.max(0, Math.ceil((when - Date.now()) / 1000)) : undefined;
 }
 
 const BASE = '/api';
@@ -71,10 +85,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!res.ok) {
+    const retryAfter = parseRetryAfter(res.headers.get('Retry-After'));
     if (isApiErrorBody(data)) {
-      throw new ApiError(data.error.message, res.status, data.error.details);
+      throw new ApiError(data.error.message, res.status, data.error.details, retryAfter);
     }
-    throw new ApiError(`Something went wrong (error ${res.status}). Please try again.`, res.status);
+    throw new ApiError(
+      `Something went wrong (error ${res.status}). Please try again.`,
+      res.status,
+      undefined,
+      retryAfter,
+    );
   }
   return data as T;
 }
