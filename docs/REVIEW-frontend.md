@@ -363,3 +363,29 @@ Fix before handing the laptop over:
 - **P2**: OCR hangs forever if its assets fail to load.
 
 P3–P5 are small and worth doing in the same pass. P6 matters mainly on the oldest phones.
+
+---
+
+## Phase 1.5 verification (commit 46f3f3e)
+
+**Setup.**
+- Built to a temp dist: `tsc` passes. The main chunk is 240 kB with no tesseract or zxing code; `ScanPage` is a separate 418 kB chunk.
+- Served by the backend with `NODE_ENV=production`, `PORT=3301`, a temp DB and `CONFIG_PATH`, and the PIN set to `246810`.
+- Driven with Playwright at 360×740, deviceScaleFactor 1.
+
+| # | Status | Evidence |
+|---|---|---|
+| **P1** PIN focus | **Fixed** | Wrong PIN, mocked 429 and an aborted (network) login all leave focus in the PIN box (`readOnly` while checking, focus restored in an effect). Five Tabs stay inside the dialog, and Escape closes it, returning focus to the trigger. The 429 now reads "wait 2 minutes", from `Retry-After`. The right PIN unlocks. |
+| **P2** OCR language file blocked | **Fixed** | With `eng.traineddata.gz` aborted, the error appears after **0.5 s**: "The text reader couldn't load — check you're on the store-room Wi-Fi and try again. The English language file (ocr/eng.traineddata.gz) did not load." Both photo buttons are enabled again. After unblocking, a new scan in the **same tab** succeeds in 1.4 s, so the failed start is not cached. There are no page errors, and no requests leave the origin (only a same-origin `blob:`). There are also 45 s and 60 s timeouts for start-up and reading. |
+| **P3** Worker / cancellation | **Fixed** | Leaving `/scan` mid-OCR terminates the worker (Playwright `close` fired), and no `/api/scan/match` request is sent after leaving. Coming back and scanning again works. The worker is also terminated after 2 minutes idle (code). |
+| **P4** Read-OK / write-fail storage | **Fixed** | With `setItem` throwing QuotaExceeded: one PIN entry, one PUT, saved, and the button shows "Leader mode on". `setToken` now verifies the write and falls back to a memory-only token. |
+| **P5** `/locate` last item | **Fixed** | Focus moves to the h2 "Every item has a location". The announcement is "Saved UNL-002 at R02-B-1. Every item has a location." |
+| **P6** 12 MP memory | **Fixed** (code review) | The photo is decoded once, already downscaled (`createImageBitmap` with `resizeWidth`/`resizeHeight`, size read first). The thumbnail is a 240 px canvas (`role="img"`, `aria-label="Your photo"`), so the original is never shown or decoded again. The working canvas is released after the scan. |
+| **P7** Error messages | **Fixed** | `OcrError` gives friendly text that names the missing part (worker, core, language file or start-up), plus messages for a read timeout and a failed read. The details go to `console.warn` for the maintainer. |
+| Nits | Fixed | N1: the visible text "Leader mode on · Lock" now matches the name. N2: 429 uses `Retry-After`. N3: the results h2 is wrapped in a `div role="status"`. N4: the barcode field is `inputMode="text"`. N5: placeholder shortened to "Tent, TNT-004, R03…". |
+
+**New issues:** none found in this focused pass.
+
+**Note:** `PinDialog` still accepts 4–5 digits on purpose (legacy PINs; the server decides), while the hint and validation message say "6 to 8 digits". This is fine, but the message for 1–3 digits says "6 to 8" even though 4 would be sent.
+
+**Verdict:** P1–P7 and the Nits are all fixed. **Phase 1.5 frontend approved.**
