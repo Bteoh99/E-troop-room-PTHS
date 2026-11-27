@@ -9,7 +9,7 @@ serves the built frontend. The contract is `../docs/SPEC.md`; Windows laptop set
 ```bash
 cd backend
 npm install
-npm run set-pin     # leader PIN (4-8 digits, 6 recommended; --force repairs a damaged config); without it writes return 403
+npm run set-pin     # leader PIN (6-8 digits; --force repairs a damaged config); without it writes return 403
 npm run seed        # 28 sample items in R01–R06, shelves A–D (only if the DB is empty)
 npm run dev         # http://localhost:3001/api, restarts on file changes (frontend via Vite on :5173)
 npm test            # vitest (in-memory DB, temp PIN config)

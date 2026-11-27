@@ -27,7 +27,8 @@ export function migrate(db) {
     // starting on a fresh DB (e.g. `npm run seed` while `npm run dev` boots) never apply a step twice.
     db.transaction(() => {
       if (currentVersion.get().v >= m.version) return;
-      db.exec(m.sql);
+      if (m.up) m.up(db);
+      else db.exec(m.sql);
       record.run(m.version, m.name, new Date().toISOString());
     }).immediate();
   }

@@ -20,7 +20,26 @@ export function resolveConfigPath(configPath = process.env.CONFIG_PATH) {
   return path.isAbsolute(configPath) ? configPath : path.resolve(BACKEND_ROOT, configPath);
 }
 
-export const isValidPin = (pin) => typeof pin === 'string' && /^\d{4,8}$/.test(pin);
+/** New PINs: 6 to 8 digits. (PINs set before this rule, 4-5 digits, keep working until changed.) */
+export const MIN_PIN_DIGITS = 6;
+export const MAX_PIN_DIGITS = 8;
+export const PIN_RULE = `${MIN_PIN_DIGITS} to ${MAX_PIN_DIGITS} digits`;
+export const isValidPin = (pin) => typeof pin === 'string' && /^\d{6,8}$/.test(pin);
+/** What a stored PIN may look like at login (older installs allowed 4-5 digits). */
+export const isLoginPinShape = (pin) => typeof pin === 'string' && /^\d{4,8}$/.test(pin);
+
+/**
+ * Known length of the stored PIN, or null if unknown (set by an older version and nobody has
+ * logged in since). The length is kept in the config so status can say "PIN too short".
+ */
+export function storedPinDigits(cfg) {
+  const d = cfg?.pin?.digits;
+  return Number.isInteger(d) ? d : null;
+}
+export const pinTooShort = (cfg) => {
+  const d = storedPinDigits(cfg);
+  return d !== null && d < MIN_PIN_DIGITS;
+};
 
 /** Read config; a missing file is an empty config. A corrupt file throws (never silently "no PIN"). */
 export function readConfig(file) {
@@ -79,12 +98,12 @@ export function verifyPin(pin, rec) {
 /**
  * Set (or change) the PIN. Always rotates the token secret, so every existing leader token stops working.
  * @param {string} file config path
- * @param {string} pin 4-8 digits
+ * @param {string} pin 6-8 digits
  * @param {object} [scryptParams] tests use a cheap N
  * @param {{ force?: boolean }} [opts] force: replace a damaged config.json (it is renamed to .broken-<time> first)
  */
 export function setPin(file, pin, scryptParams, { force = false } = {}) {
-  if (!isValidPin(pin)) throw new Error('The PIN must be 4 to 8 digits.');
+  if (!isValidPin(pin)) throw new Error(`The PIN must be ${PIN_RULE}.`);
   let cfg;
   try {
     cfg = readConfig(file);
@@ -95,7 +114,7 @@ export function setPin(file, pin, scryptParams, { force = false } = {}) {
     fs.renameSync(file, kept);
     cfg = {};
   }
-  cfg.pin = hashPin(pin, scryptParams);
+  cfg.pin = { ...hashPin(pin, scryptParams), digits: pin.length };
   cfg.tokenSecret = crypto.randomBytes(32).toString('base64');
   cfg.pinUpdatedAt = new Date().toISOString();
   writeConfig(file, cfg);

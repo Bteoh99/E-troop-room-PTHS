@@ -193,12 +193,12 @@ describe('C. login and token lifetime', () => {
     const { publicApp } = makeApp({ leader });
     const t1 = (await request(publicApp).post('/api/auth/login').send({ pin: TEST_PIN })).body.token;
     const t2 = (await request(publicApp).post('/api/auth/login').send({ pin: TEST_PIN })).body.token;
-    setPin(leader.configPath, '13579', TEST_SCRYPT);
+    setPin(leader.configPath, '135790', TEST_SCRYPT); // V2: new PINs are 6-8 digits
     for (const t of [t1, t2, leader.token]) {
       expect((await request(publicApp).delete('/api/items/1').set('Authorization', `Bearer ${t}`)).status).toBe(401);
     }
     expect((await request(publicApp).post('/api/auth/login').send({ pin: TEST_PIN })).status).toBe(401);
-    const fresh = (await request(publicApp).post('/api/auth/login').send({ pin: '13579' })).body.token;
+    const fresh = (await request(publicApp).post('/api/auth/login').send({ pin: '135790' })).body.token;
     expect((await request(publicApp).post('/api/items').set('Authorization', `Bearer ${fresh}`).send({ code: 'A', name: 'a' })).status).toBe(201);
   });
 
@@ -207,13 +207,13 @@ describe('C. login and token lifetime', () => {
     const { publicApp } = makeApp({ leader });
     const auth = { Authorization: `Bearer ${leader.token}` };
     expect((await request(publicApp).get('/api/auth/status').set(auth)).body.leader).toBe(true);
-    const r = spawnSync(process.execPath, ['scripts/set-pin.js', '--pin', '86420'], {
+    const r = spawnSync(process.execPath, ['scripts/set-pin.js', '--pin', '864200'], {
       cwd: BACKEND, env: { ...process.env, CONFIG_PATH: leader.configPath }, encoding: 'utf8', timeout: 30_000,
     });
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout + r.stderr).not.toContain('86420');
+    expect(r.stdout + r.stderr).not.toContain('864200');
     expect((await request(publicApp).get('/api/auth/status').set(auth)).body.leader).toBe(false);
-    expect((await request(publicApp).post('/api/auth/login').send({ pin: '86420' })).status).toBe(200);
+    expect((await request(publicApp).post('/api/auth/login').send({ pin: '864200' })).status).toBe(200);
   }, 30_000);
 
   it('config.json never contains the PIN in clear text', () => {
@@ -364,8 +364,8 @@ describe('C. setup-needed (no PIN) and damaged config', () => {
       }
       expect((await request(publicApp).get('/api/items')).status).toBe(200);
       fs.rmSync(leader.configPath);
-      setPin(leader.configPath, '5555', TEST_SCRYPT);
-      const { token } = (await request(publicApp).post('/api/auth/login').send({ pin: '5555' })).body;
+      setPin(leader.configPath, '555555', TEST_SCRYPT);
+      const { token } = (await request(publicApp).post('/api/auth/login').send({ pin: '555555' })).body;
       expect((await request(publicApp).post('/api/items').set('Authorization', `Bearer ${token}`).send({ code: 'A', name: 'a' })).status).toBe(201);
     } finally {
       warn.mockRestore();

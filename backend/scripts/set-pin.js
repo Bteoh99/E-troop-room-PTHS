@@ -1,7 +1,7 @@
 /**
- * Set or change the leader PIN (4-8 digits).
+ * Set or change the leader PIN (6-8 digits).
  *   npm run set-pin                 asks twice, input hidden
- *   npm run set-pin -- --pin 1234   non-interactive (for install scripts)
+ *   npm run set-pin -- --pin 123456   non-interactive (for install scripts)
  *   npm run set-pin -- --check      exit code 0 if a PIN is set, 1 if not
  *   add --force to repair a damaged config.json (the damaged file is kept as config.json.broken-<time>)
  * Changing the PIN signs out every leader (all tokens stop working).
@@ -9,7 +9,7 @@
  * history; the hidden prompt is safer.
  */
 import '../src/loadEnv.js';
-import { isValidPin, readConfig, resolveConfigPath, setPin, SCRYPT_DEFAULTS } from '../src/auth/config.js';
+import { isValidPin, PIN_RULE, pinTooShort, readConfig, resolveConfigPath, setPin, SCRYPT_DEFAULTS, storedPinDigits } from '../src/auth/config.js';
 
 const args = process.argv.slice(2);
 const argValue = (name) => {
@@ -65,29 +65,33 @@ async function main() {
   }
   if (args.includes('--check')) {
     let set = false;
+    let cfg;
     try {
-      const cfg = readConfig(file);
+      cfg = readConfig(file);
       set = Boolean(cfg.pin && cfg.tokenSecret);
     } catch (err) {
       console.log(`Leader PIN: settings file is damaged (${err.message}). Repair: npm run set-pin -- --force`);
       return 2;
     }
     console.log(set ? 'Leader PIN: set' : 'Leader PIN: not set');
+    if (set && pinTooShort(cfg)) {
+      console.log(`Warning: the leader PIN has only ${storedPinDigits(cfg)} digits. New PINs need ${PIN_RULE}; change it with set-pin.`);
+    }
     return set ? 0 : 1;
   }
 
   let pin = argValue('--pin');
   if (pin === undefined) {
     if (!process.stdin.isTTY) {
-      console.error('No terminal to type into. Use: npm run set-pin -- --pin 1234');
+      console.error('No terminal to type into. Use: npm run set-pin -- --pin 123456');
       return 1;
     }
-    console.log('Choose the leader PIN: 4 to 8 digits; 6 digits are recommended (much harder to guess than 4).');
+    console.log(`Choose the leader PIN: ${PIN_RULE} (numbers only).`);
     console.log('Leaders type it on their phones to add, edit or import items.');
     for (;;) {
       const first = (await askHidden('New leader PIN: ')).trim();
       if (!isValidPin(first)) {
-        console.log('The PIN must be 4 to 8 digits (numbers only). Try again.');
+        console.log(`The PIN must be ${PIN_RULE} (numbers only). Try again.`);
         continue;
       }
       const second = (await askHidden('Type it again:  ')).trim();
@@ -101,7 +105,7 @@ async function main() {
   }
   pin = String(pin).trim();
   if (!isValidPin(pin)) {
-    console.error('The PIN must be 4 to 8 digits (numbers only).');
+    console.error(`The PIN must be ${PIN_RULE} (numbers only).`);
     return 1;
   }
   try {
@@ -113,7 +117,6 @@ async function main() {
     }
     throw err;
   }
-  if (pin.length < 6) console.log('Tip: a 6-digit PIN is much harder to guess than a 4-digit one.');
   console.log(`Leader PIN saved (${file}). Leaders must unlock leader mode again on their phones.`);
   return 0;
 }

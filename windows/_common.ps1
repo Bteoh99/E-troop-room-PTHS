@@ -188,6 +188,13 @@ function Protect-AppFolder {
     }
 }
 
+# (Re)create the inbound firewall rule: TCP <port>, Private networks, local subnet only. THROWS on failure.
+function Set-AppFirewallRule([int]$Port) {
+    Get-NetFirewallRule -DisplayName $script:FirewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $script:FirewallRuleName -Description 'Phones on the troop Wi-Fi open the e-Troop Store Room app' `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+}
+
 function Start-StoreRoomTask {
     if (-not (Test-TaskExists)) { throw 'The app is not installed yet (no start-up task). Run install.bat.' }
     Start-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop

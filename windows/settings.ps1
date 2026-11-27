@@ -11,7 +11,13 @@ Write-Step 'Opening the settings in Notepad. Save (Ctrl+S) and close Notepad whe
 Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\notepad.exe') -ArgumentList ('"' + $envFile + '"') -Wait
 $newPort = Get-AppPort
 if ($newPort -ne $oldPort) {
-    Write-Note ('The port changed to ' + $newPort + '. Run install.bat once so the firewall rule matches.')
+    Write-Step ('The port changed from ' + $oldPort + ' to ' + $newPort + ': updating the firewall rule')
+    try {
+        Set-AppFirewallRule $newPort
+        Write-Ok ('Phones can now reach port ' + $newPort + ' (Private networks, local subnet only). Update their bookmarks.')
+    } catch {
+        Write-Note ('Could not update the firewall rule: ' + $_.Exception.Message + ' - run install.bat to fix it.')
+    }
 }
 $answer = Read-Host '    Restart the app now so the changes take effect? (Y/N)'
 if ($answer -match '^[Yy]') {

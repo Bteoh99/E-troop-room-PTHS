@@ -12,7 +12,7 @@ import { signToken } from '../src/auth/tokens.js';
 
 /** Cheap scrypt cost for tests only (production uses SCRYPT_DEFAULTS). */
 export const TEST_SCRYPT = { N: 1024 };
-export const TEST_PIN = '2468';
+export const TEST_PIN = '246810'; // new PINs must be 6-8 digits (lead decision V2)
 
 /** A fresh temp folder (removed when the test process exits). */
 export function tmpDir(prefix = 'etroop-test-') {

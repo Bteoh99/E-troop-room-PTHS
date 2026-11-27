@@ -4,7 +4,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, badRequest, HttpError, zodDetails } from '../lib/errors.js';
-import { createConfigSource, resolveConfigPath, verifyPin } from './config.js';
+import { createConfigSource, isLoginPinShape, pinTooShort, readConfig, resolveConfigPath, storedPinDigits, verifyPin, writeConfig } from './config.js';
 import { createLoginLimiter } from './rateLimit.js';
 import { signToken, verifyToken } from './tokens.js';
 
@@ -27,7 +27,21 @@ function bearer(req) {
  * Damaged config.json -> 503 on writes, login and status (never "PIN not set").
  */
 export function createAuth({ configPath, limiter = createLoginLimiter() } = {}) {
-  const getConfig = createConfigSource(resolveConfigPath(configPath));
+  const file = resolveConfigPath(configPath);
+  const getConfig = createConfigSource(file);
+
+  /** PIN set by an older version: learn its length at the first correct login (for pinTooShort). */
+  function rememberPinDigits(digits) {
+    try {
+      const fresh = readConfig(file);
+      if (fresh.pin && storedPinDigits(fresh) === null) {
+        fresh.pin.digits = digits;
+        writeConfig(file, fresh);
+      }
+    } catch (err) {
+      console.warn(`Warning: could not update ${file}: ${err.message}`);
+    }
+  }
   const pinSet = (cfg) => Boolean(cfg.pin && cfg.tokenSecret);
 
   function leaderStatus(req) {
@@ -56,7 +70,8 @@ export function createAuth({ configPath, limiter = createLoginLimiter() } = {}) 
   router.get('/status', (req, res) => {
     const s = leaderStatus(req);
     if (s.cfg.broken) throw new HttpError(503, CONFIG_DAMAGED_MESSAGE);
-    res.json({ pinSet: pinSet(s.cfg), leader: s.ok });
+    // pinTooShort only appears (true) for a 4-5 digit PIN from an older install: change it with set-pin.
+    res.json({ pinSet: pinSet(s.cfg), leader: s.ok, ...(pinTooShort(s.cfg) ? { pinTooShort: true } : {}) });
   });
 
   router.post('/login', asyncHandler(async (req, res) => {
@@ -78,12 +93,13 @@ export function createAuth({ configPath, limiter = createLoginLimiter() } = {}) 
     }
     let outcome = 'neutral';
     try {
-      const ok = /^\d{4,8}$/.test(parsed.data.pin) && (await verifyPin(parsed.data.pin, cfg.pin));
+      const ok = isLoginPinShape(parsed.data.pin) && (await verifyPin(parsed.data.pin, cfg.pin));
       outcome = ok ? 'ok' : 'fail';
     } finally {
       gate.done(outcome);
     }
     if (outcome !== 'ok') throw new HttpError(401, 'Wrong PIN.');
+    if (storedPinDigits(cfg) === null) rememberPinDigits(parsed.data.pin.length);
     res.json(signToken(cfg.tokenSecret));
   }));
 

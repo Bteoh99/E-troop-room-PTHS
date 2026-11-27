@@ -66,8 +66,7 @@ Do this while logged in with the **administrator** account.
 3. Windows asks "Do you want to allow this app to make changes?". Click **Yes**.
 4. A blue window shows the progress. Downloading and building takes **5–15 minutes**.
 5. It will ask you some questions:
-   - **Leader PIN**: choose **6 digits** (4 to 8 are allowed, but 6 is much harder to guess) and
-     type it twice. The digits show as `*` while you type. Give this PIN only to leaders.
+   - **Leader PIN**: choose **6 to 8 digits** (numbers only) and type it twice. The digits show as `*` while you type. Give this PIN only to leaders.
    - **"Make the network Private?"**: only if the network named is the **troop Wi-Fi** and you trust
      it. Type `Y` and press **Enter**. Phones cannot connect while the network is "Public".
    - **"Keep the laptop awake when plugged in?"**: type `Y`. The laptop then never sleeps on mains
@@ -136,9 +135,12 @@ running `install.bat` again: it prints the address at the end.
 On the laptop:
 
 1. Double-click `C:\eTroop\windows\set-pin.bat` and click **Yes**.
-2. Type the new PIN twice. 6 digits are recommended.
+2. Type the new PIN twice. It must be 6 to 8 digits.
 
 Every phone is then signed out of leader mode and needs the new PIN.
+
+**Older 4- or 5-digit PIN?** It still works, but change it to 6 to 8 digits soon with `set-pin.bat`.
+The app may remind you.
 
 - **Forgot the PIN?** Do the same thing. The old PIN is not needed.
 - **The app says "Leader settings file is damaged"?** This can happen after a power cut. Do the same
@@ -259,7 +261,7 @@ If the app keeps stopping, the reason is written there.
 **"Port 3001 is already in use"** Another program uses that port.
 
 1. Run `settings.bat` and change `PORT=` to, for example, `3002`.
-2. Run `install.bat` again so the firewall matches.
+2. Save, close Notepad and answer `Y` to restart. The firewall rule is updated automatically.
 
 Phones then use `:3002` in the address.
 

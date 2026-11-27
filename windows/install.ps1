@@ -76,7 +76,7 @@ if ($pinState -eq 0) {
     Write-Ok 'A leader PIN is already set. (To change it later: double-click windows\set-pin.bat.)'
 } else {
     if ($pinState -eq 2) { Write-Note 'The PIN settings file is damaged; it will be replaced (a copy of the damaged file is kept).' }
-    Write-Host '    Choose the leader PIN now: 4 to 8 digits, 6 digits recommended.'
+    Write-Host '    Choose the leader PIN now: 6 to 8 digits (numbers only).'
     Write-Host '    You will type it twice; the digits are shown as *.'
     & $nodePath 'scripts\set-pin.js' '--force'
     if ($LASTEXITCODE -ne 0) {
@@ -88,10 +88,8 @@ Pop-Location
 
 # 7. Firewall: allow phones on PRIVATE networks, from the local Wi-Fi subnet only
 Write-Step ('Allowing phones on the private Wi-Fi to reach port ' + $port)
-Get-NetFirewallRule -DisplayName $script:FirewallRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
 try {
-    New-NetFirewallRule -DisplayName $script:FirewallRuleName -Description 'Phones on the troop Wi-Fi open the e-Troop Store Room app' `
-        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Private -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+    Set-AppFirewallRule $port
     Write-Ok 'Firewall rule added (Private networks, local subnet only).'
 } catch {
     Stop-WithError ('Could not add the firewall rule: ' + $_.Exception.Message)

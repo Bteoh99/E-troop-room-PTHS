@@ -215,9 +215,9 @@ describe('B. POST /api/scan/match', () => {
 
 describe('C. leader PIN', () => {
   it('config stores only a scrypt hash + salt and a token secret', () => {
-    const { configPath } = makeLeaderConfig('13579');
+    const { configPath } = makeLeaderConfig('135790');
     const text = fs.readFileSync(configPath, 'utf8');
-    expect(text).not.toContain('13579');
+    expect(text).not.toContain('135790');
     const cfg = JSON.parse(text);
     expect(cfg.pin).toMatchObject({ algo: 'scrypt', salt: expect.any(String), hash: expect.any(String) });
     expect(cfg.tokenSecret).toEqual(expect.any(String));
@@ -301,11 +301,11 @@ describe('C. leader PIN', () => {
     const auth = { Authorization: `Bearer ${leader.token}` };
     expect((await request(publicApp).get('/api/auth/status').set(auth)).body.leader).toBe(true);
     await new Promise((r) => setTimeout(r, 20));
-    setPin(leader.configPath, '97531', TEST_SCRYPT);
+    setPin(leader.configPath, '975310', TEST_SCRYPT);
     expect((await request(publicApp).get('/api/auth/status').set(auth)).body.leader).toBe(false);
     expect((await request(publicApp).post('/api/items').set(auth).send({ code: 'A', name: 'a' })).status).toBe(401);
     expect((await request(publicApp).post('/api/auth/login').send({ pin: TEST_PIN })).status).toBe(401);
-    expect((await request(publicApp).post('/api/auth/login').send({ pin: '97531' })).status).toBe(200);
+    expect((await request(publicApp).post('/api/auth/login').send({ pin: '975310' })).status).toBe(200);
   });
 
   it('rate limit: 5 wrong tries -> 429 (even for the right PIN) for 5 minutes, then allowed again', async () => {
@@ -355,9 +355,10 @@ describe('C. leader PIN', () => {
     });
     expect(run('--check').status).toBe(1);
     expect(run('--pin', '12').status).toBe(1);
-    const ok = run('--pin', '8642');
+    expect(run('--pin', '12345').status).toBe(1); // V2: new PINs need 6-8 digits
+    const ok = run('--pin', '864200');
     expect(ok.status, ok.stderr).toBe(0);
-    expect(ok.stdout).not.toContain('8642');
+    expect(ok.stdout).not.toContain('864200');
     expect(run('--check').status).toBe(0);
     expect(readConfig(configPath).pin.algo).toBe('scrypt');
   }, 30_000);

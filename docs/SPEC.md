@@ -133,7 +133,7 @@ Response: `{ "matches": [{ "item": Item, "score": number (0..1), "matchedOn": st
 Pure scoring logic in its own module (unit-testable).
 
 ## C. Leader PIN (backend)
-- PIN is 4–8 digits, stored only as a **scrypt hash + salt** in `data/config.json` (gitignored), never in code or logs. Set/change with `npm run set-pin` (prompts twice, hidden input; also accepts `--pin` for scripts). If no PIN is set, the server starts in **setup-needed** mode: writes return 403 `{error:{message:"Leader PIN not set. Run set-pin on the laptop."}}`.
+- PIN is **6–8 digits** (changed in the final backend round; see notes at the end), stored only as a **scrypt hash + salt** in `data/config.json` (gitignored), never in code or logs. Set/change with `npm run set-pin` (prompts twice, hidden input; also accepts `--pin` for scripts). If no PIN is set, the server starts in **setup-needed** mode: writes return 403 `{error:{message:"Leader PIN not set. Run set-pin on the laptop."}}`.
 - `POST /api/auth/login {pin}` → `{ token, expiresAt }`. Token = HMAC-SHA256-signed (secret random per install, stored in config.json) with 30-day expiry. Wrong PIN → 401. **Rate limit**: 5 wrong attempts per IP → 429 for 5 minutes (also a global cap of 20 wrong/5 min). Constant-time compare.
 - `GET /api/auth/status` → `{ pinSet: bool, leader: bool }` (leader = valid token sent).
 - Writes (`POST/PUT/DELETE /api/items*`, `POST /api/import` incl. dry run) require `Authorization: Bearer <token>`; missing/invalid/expired → 401. Reads, `/api/scan/match`, template download stay public.
@@ -203,7 +203,7 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
   - Pending checks count against the per-IP limit of 5 wrong tries per 5 minutes, so a burst of 200 parallel logins gets at most 5 checks.
   - **Global slowdown instead of a global lock-out:** a bucket of 10 wrong tries refills at 1 per second; when it is empty, 429 with `Retry-After: 1`. A correct PIN gives its token back.
   - A per-IP block still answers 429 "Too many wrong PIN attempts. Wait 5 minutes…" with `Retry-After` up to 300.
-  - `set-pin` and the guide recommend a 6-digit PIN; 4–8 digits are still accepted.
+  - New PINs must be 6–8 digits (see the final round below).
 - **Damaged `config.json`** (empty, unparseable or not an object): writes, `POST /api/auth/login` **and** `GET /api/auth/status` → **503** "Leader settings file is damaged. Run set-pin on the laptop to repair it…".
   - `set-pin --force` (and `windows/set-pin.bat`) replaces it and keeps the damaged file as `config.json.broken-<time>`.
   - `set-pin --check` exits 0 = set, 1 = not set, 2 = damaged.
@@ -232,3 +232,16 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
   - The firewall rule is Private profile **and** `RemoteAddress LocalSubnet`. The installer offers to remove inbound Block rules for node.exe.
   - `update.ps1` always tries to restart the task and reports what failed.
   - New scripts: `start-app` (start without internet), `set-pin`, `settings` (edit `.env` + restart) and `backup-now`, each as `.ps1` + `.bat`.
+
+### Final backend round (V1–V3)
+- **Leader PIN length:**
+  - New PINs must be **6–8 digits**. `set-pin` rejects 4–5 digits.
+  - A 4–5 digit PIN stored by an older install still logs in until it is changed.
+  - The stored PIN's length is recorded in `config.json` (`pin.digits`) when the PIN is set, or at the first correct login for older configs.
+  - `GET /api/auth/status` then also returns **`pinTooShort: true`**. The key is only present when it is true, so the response is otherwise unchanged.
+  - `set-pin --check` prints a warning for a short PIN.
+- **Migration v3** no longer fails on a v2 database where two barcodes differ only by leading zeros:
+  - Before the unique index is created, the item with the lowest id keeps the barcode.
+  - The others get `barcode = NULL`, and their notes get "Barcode <value> removed: duplicate of <CODE> (leading zeros)".
+  - A warning with the count is logged at start-up.
+- **Windows:** `settings.ps1` recreates the firewall rule itself (same Private + LocalSubnet rule) when the port changes.
