@@ -11,7 +11,7 @@ most of it waiting for downloads.
 - The laptop: Windows 10, **64-bit**, plugged into power, connected to the troop Wi-Fi.
 - The Windows password of an **administrator** account on the laptop.
 - Internet on the laptop during setup and updates.
-- The download address of the app (ask the troop's tech helper; it ends in `.git`).
+- The download address of the app (`https://github.com/Bteoh99/E-troop-room-PTHS.git`).
 
 ---
 
@@ -52,11 +52,13 @@ We put the app in `C:\eTroop`.
 Do this while logged in with the **administrator** account.
 
 1. Press the **Windows key**, type `cmd`, press **Enter**. A black "Command Prompt" window opens.
-2. Type these two lines, pressing **Enter** after each. Replace the address with the one you were given.
+2. Type these two lines, pressing **Enter** after each:
    ```
    cd C:\
-   git clone https://example.org/your-troop/e-troop-room.git eTroop
+   git clone https://github.com/Bteoh99/E-troop-room-PTHS.git eTroop
    ```
+   If the repository is private, a GitHub sign-in window opens. Sign in with the GitHub account that
+   owns the repository; Windows remembers it for later updates.
 3. When it finishes, close the window.
 
 ## 6. Run the installer
