@@ -29,6 +29,10 @@ most of it waiting for downloads.
    - On the page "Tools for Native Modules", **leave the box unticked**. It is not needed.
 4. Click **Finish**.
 
+> Use the normal installer from nodejs.org, which installs Node.js **for all users** in `C:\Program Files`.
+> Tools that install Node.js only for your own Windows account (nvm, fnm, a zip file) do not work. The app
+> starts before anyone logs in, so it cannot use them. The installer checks this and tells you.
+
 ## 3. Install Git (used to download and update the app)
 
 1. Go to **git-scm.com** and click **Download for Windows**. Choose the 64-bit installer.
@@ -45,6 +49,8 @@ We put the app in `C:\eTroop`.
 > Do **not** use Desktop, Documents or a OneDrive folder. Those can be moved or synced
 > and the app runs in the background.
 
+Do this while logged in with the **administrator** account.
+
 1. Press the **Windows key**, type `cmd`, press **Enter**. A black "Command Prompt" window opens.
 2. Type these two lines, pressing **Enter** after each. Replace the address with the one you were given.
    ```
@@ -60,12 +66,14 @@ We put the app in `C:\eTroop`.
 3. Windows asks "Do you want to allow this app to make changes?". Click **Yes**.
 4. A blue window shows the progress. Downloading and building takes **5–15 minutes**.
 5. It will ask you some questions:
-   - **Leader PIN**: choose **4 to 8 digits** and type it twice. The digits are not shown while you
-     type. Give this PIN only to leaders.
+   - **Leader PIN**: choose **6 digits** (4 to 8 are allowed, but 6 is much harder to guess) and
+     type it twice. The digits show as `*` while you type. Give this PIN only to leaders.
    - **"Make the network Private?"**: only if the network named is the **troop Wi-Fi** and you trust
      it. Type `Y` and press **Enter**. Phones cannot connect while the network is "Public".
    - **"Keep the laptop awake when plugged in?"**: type `Y`. The laptop then never sleeps on mains
      power, and closing the lid does not stop the app.
+   - It may say that Windows has firewall rules that **block Node.js** and ask whether to remove them.
+     Type `Y`. These rules are left over from someone clicking "Cancel" on a Windows security popup.
 6. At the end it shows something like:
    ```
    On phones:       http://192.168.1.50:3001
@@ -76,6 +84,11 @@ The app now starts by itself every time the laptop is switched on, even if nobod
 Wait about a minute after switching the laptop on before using it.
 
 Running **install.bat** again is safe. It repairs the installation and keeps all your items.
+
+**For safety, the installer locks the app folder.** Only administrators can change files in
+`C:\eTroop`, and only administrators can open `C:\eTroop\backend\data`, where the items, the PIN
+settings and the backups are. This matters because the app runs with full system rights. Use the
+`.bat` files in `C:\eTroop\windows`. Each one asks for administrator permission itself.
 
 ## 7. Make sure the Wi-Fi is "Private"
 
@@ -115,21 +128,21 @@ running `install.bat` again: it prints the address at the end.
 
 1. Tap the **🔒 Leader** button and type the PIN.
 2. Leader mode stays on for 30 days on that phone, or until you tap **Lock**.
-3. After 5 wrong PINs, the phone must wait 5 minutes.
+3. After 5 wrong PINs, that phone must wait 5 minutes. If many wrong PINs come from several phones at
+   once, everyone has to wait a few seconds between tries.
 
 ## 10. Changing or resetting the leader PIN
 
 On the laptop:
 
-1. Open Command Prompt (step 5.1) and type:
-   ```
-   cd C:\eTroop\backend
-   npm run set-pin
-   ```
-2. Type the new PIN twice.
+1. Double-click `C:\eTroop\windows\set-pin.bat` and click **Yes**.
+2. Type the new PIN twice. 6 digits are recommended.
 
-Every phone is then signed out of leader mode and needs the new PIN. If you forgot the PIN, do the same
-thing; the old PIN is not needed.
+Every phone is then signed out of leader mode and needs the new PIN.
+
+- **Forgot the PIN?** Do the same thing. The old PIN is not needed.
+- **The app says "Leader settings file is damaged"?** This can happen after a power cut. Do the same
+  thing. A copy of the damaged file is kept.
 
 ## 11. Backups
 
@@ -137,7 +150,7 @@ thing; the old PIN is not needed.
   The newest 30 copies are kept.
 - **Where:** `C:\eTroop\backend\data\backups`. Each copy is named after its date, like
   `store-2026-11-26.db`.
-- **Back up right now:** double-click `C:\eTroop\windows\backup-now.bat`.
+- **Back up right now:** double-click `C:\eTroop\windows\backup-now.bat` and click **Yes**.
 
 **Keep a copy somewhere else too.** If the laptop dies, the backups on it die with it.
 
@@ -147,16 +160,18 @@ thing; the old PIN is not needed.
 2. In its settings, choose **"Mirror files"**, not "Stream files". The app runs in the background
    and cannot see the Streaming `G:` drive.
 3. Your Drive is then a normal folder, for example `C:\Users\YourName\My Drive`.
+4. Google Drive only uploads while someone is **logged in** to the laptop. The backups are still made
+   while nobody is logged in, and they are uploaded at the next log-in.
 
 **Changing the backup folder**
 
-1. Open `C:\eTroop\backend\.env` with **Notepad**.
+1. Double-click `C:\eTroop\windows\settings.bat` and click **Yes**. The settings open in Notepad.
 2. Change the `BACKUP_DIR=` line, for example:
    ```
    BACKUP_DIR=C:\Users\YourName\My Drive\Store Room Backups
    ```
-3. Save the file.
-4. Run `install.bat` again, or restart the laptop.
+3. Save (Ctrl+S) and close Notepad.
+4. Answer `Y` to restart the app.
 
 A USB stick also works, as long as it always gets the same drive letter.
 
@@ -166,12 +181,13 @@ You can change the time of the evening backup (`BACKUP_HOUR`) and the number of 
 **Restoring a backup** (only if something went wrong)
 
 1. Double-click `windows\stop.bat`.
-2. In `C:\eTroop\backend\data`:
+2. Open `C:\eTroop\backend\data` in File Explorer. Windows says you need permission; click
+   **Continue** (administrator). Then:
    1. Rename `store.db` to `store-broken.db`.
    2. Delete `store.db-wal` and `store.db-shm` if they exist.
 3. Copy the backup you want (for example `backups\store-2026-11-20.db`) into `C:\eTroop\backend\data`
    and rename it to `store.db`.
-4. Run `install.bat` again, or restart the laptop.
+4. Double-click `windows\start-app.bat`.
 
 ## 12. Updating the app
 
@@ -180,13 +196,16 @@ You can change the time of the evening backup (`BACKUP_HOUR`) and the number of 
 
 Your items, PIN, settings and backups are kept.
 
+If something goes wrong, for example the internet drops halfway, the update says so in red. It always
+tries to start the app again. Run `update.bat` again once the internet works.
+
 ## 13. Stopping or removing the app
 
-- `windows\stop.bat` stops the app until the next restart. Run `install.bat` to start it again
-  straight away.
+- `windows\stop.bat` stops the app until the next restart. Double-click `windows\start-app.bat` to
+  start it again straight away. No internet is needed.
 - `windows\uninstall.bat` stops the app from starting with Windows and removes the firewall rule.
   **Your data is kept** in `C:\eTroop\backend\data`. Copy that folder somewhere safe before you delete
-  anything.
+  anything. File Explorer asks for administrator permission to open it; click **Continue**.
 
 ---
 
@@ -201,12 +220,27 @@ Your items, PIN, settings and backups are kept.
      - Make sure the Wi-Fi is **Private** (step 7).
      - The laptop's address may have changed. Run `install.bat` to see the current address, and
        consider a fixed address (step 8).
-   - If that does not work either, the app is not running. Look at the log (below), or run
-     `install.bat` again.
+   - If that works, Windows may also have a firewall rule that **blocks Node.js**. This happens if
+     someone once clicked "Cancel" on a "Windows Security Alert" popup. To fix it:
+     1. Run `install.bat` again and answer `Y` when it offers to remove the block rules.
+     2. Or do it by hand: **Control Panel → Windows Defender Firewall → Allow an app through
+        firewall → Change settings**. Find **Node.js JavaScript Runtime**, tick **Private**, and
+        remove any duplicate entries.
+   - If that does not work either, the app is not running. Double-click `windows\start-app.bat`,
+     or look at the log (below).
 
 **"Leader PIN not set. Run set-pin on the laptop."** Do step 10.
 
-**"Too many wrong tries"** Wait 5 minutes, then try again.
+**"Too many wrong PIN attempts"** Wait 5 minutes on that phone, or use another phone, or unlock
+on the laptop itself at `http://localhost:3001`.
+
+**"Too many PIN attempts at once"** Wait a few seconds and try again.
+
+**"Leader settings file is damaged"** Run `windows\set-pin.bat` (step 10).
+
+**The installer says Node.js "is installed only for one Windows user"** Uninstall that Node.js. Then
+install it again from nodejs.org with the normal Windows Installer, restart the laptop and run
+`install.bat`.
 
 **The installer stops with a red PROBLEM message**
 
@@ -215,10 +249,18 @@ Your items, PIN, settings and backups are kept.
    run `install.bat` again.
 3. If it says Node.js is missing or too old, repeat steps 2 and 4.
 
-**Where is the log?** `C:\eTroop\backend\data\logs\server.log`. Open it with Notepad. The newest
-lines are at the bottom. If the app keeps stopping, the reason is written there.
+**Where is the log?** `C:\eTroop\backend\data\logs\server.log`.
 
-**"Port 3001 is already in use"** Another program uses that port. Change `PORT=` in `backend\.env`
-to, for example, `3002` and run `install.bat` again. Phones then use `:3002` in the address.
+1. File Explorer asks for administrator permission; click **Continue**.
+2. Open the log with Notepad. The newest lines are at the bottom.
+
+If the app keeps stopping, the reason is written there.
+
+**"Port 3001 is already in use"** Another program uses that port.
+
+1. Run `settings.bat` and change `PORT=` to, for example, `3002`.
+2. Run `install.bat` again so the firewall matches.
+
+Phones then use `:3002` in the address.
 
 **After a big Windows update the app does not start.** Run `install.bat` again.

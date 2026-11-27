@@ -84,8 +84,14 @@ export function getItemByCode(db, code) {
   return rowToItem(stmt(db, 'SELECT * FROM items WHERE code = ? COLLATE NOCASE').get(String(code).trim()));
 }
 
+/** Barcodes compare ignoring leading zeros (same expression as the unique index). */
 export function getItemByBarcode(db, barcode) {
-  return rowToItem(stmt(db, 'SELECT * FROM items WHERE barcode = ?').get(barcode));
+  return rowToItem(stmt(db, "SELECT * FROM items WHERE barcode IS NOT NULL AND ltrim(barcode, '0') = ltrim(?, '0')").get(barcode));
+}
+
+/** Import helper: free a barcode before another item takes it in the same transaction. */
+export function clearBarcode(db, id) {
+  stmt(db, 'UPDATE items SET barcode = NULL WHERE id = ?').run(id);
 }
 
 function assertBarcodeFree(db, barcode, selfId = null) {
@@ -227,7 +233,7 @@ export function listItems(db, { q, category, rack, condition, unlocated } = {}) 
       });
     }
     rankSelect = `, CASE
-        WHEN fold(code) = @ql OR (barcode IS NOT NULL AND barcode = @bc) THEN 0
+        WHEN fold(code) = @ql OR (barcode IS NOT NULL AND ltrim(barcode, '0') = ltrim(@bc, '0')) THEN 0
         WHEN @loc IS NOT NULL AND location_code = @loc THEN 1
         WHEN substr(fold(code), 1, length(@ql)) = @ql THEN 2
         WHEN substr(fold(name), 1, length(@ql)) = @ql THEN 3

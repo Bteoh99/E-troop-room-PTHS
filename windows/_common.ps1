@@ -34,7 +34,7 @@ function Wait-ForEnter {
 function Stop-WithError([string]$Message) {
     Write-Host ''
     Write-Host ('PROBLEM: ' + $Message) -ForegroundColor Red
-    Write-Host 'Nothing else was changed after this step. See docs\SETUP-WINDOWS.md (Troubleshooting).' -ForegroundColor Red
+    Write-Host 'See docs\SETUP-WINDOWS.md (Troubleshooting).' -ForegroundColor Red
     Wait-ForEnter
     exit 1
 }
@@ -139,7 +139,7 @@ function Wait-ForServer {
     return $false
 }
 
-# Run "npm <args>" in a folder; stop with a clear message if it fails.
+# Run "npm <args>" in a folder; THROWS a clear message if it fails (callers decide what to do).
 function Invoke-Npm([string]$Folder, [string[]]$NpmArgs, [string]$What) {
     Push-Location -LiteralPath $Folder
     try {
@@ -148,9 +148,52 @@ function Invoke-Npm([string]$Folder, [string[]]$NpmArgs, [string]$What) {
     } finally {
         Pop-Location
     }
-    if ($code -ne 0) { Stop-WithError ($What + ' failed (npm exit code ' + $code + '). Check the internet connection and try again.') }
+    if ($code -ne 0) { throw ($What + ' failed (npm exit code ' + $code + '). Check the internet connection and try again.') }
 }
 
+# The node.exe the startup task must use (recorded by install.ps1; start.bat never uses a bare "node").
+$script:NodePathFile = Join-Path $script:BackendDir 'data\node-path.txt'
+
+# Full path of node.exe, refusing a per-user install (the startup task runs as SYSTEM and cannot use it).
+function Get-SystemNodePath {
+    $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) { return $null }
+    $nodePath = [string]$cmd.Source
+    $usersDir = Join-Path $env:SystemDrive 'Users'
+    if ($nodePath.StartsWith($usersDir, [StringComparison]::OrdinalIgnoreCase) -or ($nodePath -match '\\AppData\\')) {
+        Stop-WithError ('Node.js is installed only for one Windows user (' + $nodePath + '). The app starts before anyone logs in, so it needs Node.js installed for ALL users: uninstall this Node.js (and nvm/fnm if used), then install Node.js 22 LTS 64-bit from nodejs.org with the normal Windows Installer (.msi), restart the laptop and run install.bat again.')
+    }
+    return $nodePath
+}
+
+# Only Administrators and SYSTEM may change the app (it runs as SYSTEM); other users may read and run it.
+# backend\data (database, PIN settings, backups, logs) is not readable by other users at all.
+function Protect-AppFolder {
+    $root = $script:RepoRoot
+    $sys = '*S-1-5-18'
+    $admins = '*S-1-5-32-544'
+    $users = '*S-1-5-32-545'
+    & icacls.exe $root /setowner $admins /T /C /Q | Out-Null
+    & icacls.exe $root /inheritance:r /grant:r ($sys + ':(OI)(CI)F') ($admins + ':(OI)(CI)F') ($users + ':(OI)(CI)RX') /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw ('Could not set the permissions of ' + $root + ' (icacls exit code ' + $LASTEXITCODE + ').') }
+    # Make every file and folder inside simply inherit those permissions (removes older custom ones).
+    & icacls.exe (Join-Path $root '*') /reset /T /C /Q | Out-Null
+
+    $data = Join-Path $script:BackendDir 'data'
+    New-Item -ItemType Directory -Force -Path $data | Out-Null
+    & icacls.exe $data /inheritance:r /grant:r ($sys + ':(OI)(CI)F') ($admins + ':(OI)(CI)F') /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw ('Could not protect ' + $data + ' (icacls exit code ' + $LASTEXITCODE + ').') }
+    if (@(Get-ChildItem -LiteralPath $data -Force).Count -gt 0) {
+        & icacls.exe (Join-Path $data '*') /reset /T /C /Q | Out-Null
+    }
+}
+
+function Start-StoreRoomTask {
+    if (-not (Test-TaskExists)) { throw 'The app is not installed yet (no start-up task). Run install.bat.' }
+    Start-ScheduledTask -TaskName $script:TaskName -ErrorAction Stop
+}
+
+# Installs packages and builds the frontend; THROWS on failure.
 function Install-AppDependencies {
     Write-Step 'Installing the server (backend) packages - this can take a few minutes'
     Invoke-Npm $script:BackendDir @('ci', '--omit=dev', '--no-audit', '--no-fund') 'Installing backend packages'
@@ -160,7 +203,7 @@ function Install-AppDependencies {
     Invoke-Npm $script:FrontendDir @('ci', '--include=dev', '--no-audit', '--no-fund') 'Installing frontend packages'
     Invoke-Npm $script:FrontendDir @('run', 'build') 'Building the frontend'
     if (-not (Test-Path -LiteralPath (Join-Path $script:FrontendDir 'dist\index.html'))) {
-        Stop-WithError 'The frontend build did not produce frontend\dist\index.html.'
+        throw 'The frontend build did not produce frontend\dist\index.html.'
     }
     Write-Ok 'Phone app built.'
 }

@@ -179,7 +179,7 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
   - Send the token as `Authorization: Bearer <token>`.
 - **Serving**:
   - `frontend/dist` (or `FRONTEND_DIST`) is served only when `NODE_ENV=production` or `SERVE_FRONTEND=1`, and only if it contains `index.html`. `windows/start.bat` sets `NODE_ENV=production`.
-  - SPA fallback applies to GET paths **without a file extension**; a missing `/assets/x.js` is a real 404.
+  - SPA fallback applies to every GET page path. Only a missing file with a known asset extension (`.js .mjs .css .png .jpg .jpeg .gif .webp .svg .ico .wasm .json .map .woff .woff2 .ttf .txt .webmanifest .traineddata .gz .html`) is a real 404, as plain text. So `/items/1.5` gets `index.html`.
   - `assets/*` gets `Cache-Control: public, max-age=31536000, immutable`; everything else outside `/api` gets `no-cache`; `/api/*` gets `no-store`. `.wasm` is served as `application/wasm`.
 - **Security headers on every response:**
   - `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`.
@@ -191,7 +191,44 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
   - Backups are written as `<name>.partial`, then renamed, so a half-written file never looks like a backup. A second backup on the same day replaces that day's file.
   - New npm scripts: `npm run set-pin [-- --pin 1234 | --check]` and `npm run backup`.
 - **Windows**:
-  - Double-click wrappers `install.bat`, `update.bat`, `stop.bat` and `uninstall.bat` were added next to the `.ps1` scripts. Each script asks for Administrator rights by itself.
+  - Double-click wrappers `install.bat`, `update.bat`, `stop.bat`, `uninstall.bat`, `start-app.bat`, `set-pin.bat`, `settings.bat` and `backup-now.bat` sit next to their `.ps1` scripts. Each script asks for Administrator rights by itself.
   - The startup task runs as **SYSTEM**. That is why a Google Drive backup folder must be in "Mirror files" mode.
   - `start.bat` restarts the server 10 s after it exits. It rotates `server.log` (over 5 MB → `server.log.1`) each time the server (re)starts.
   - The guide is `docs/SETUP-WINDOWS.md`.
+
+### Phase 1.5 fix round (backend + Windows; overrides the notes above where they differ)
+- **Login rate limit** (this replaces the spec's "global cap of 20 wrong/5 min"):
+  - The attempt is reserved **before** the scrypt check.
+  - At most **1 PIN check in flight per IP** and **2 globally**. Extra concurrent requests get 429 at once, with `Retry-After: 1` and the message "Too many PIN attempts at once. Wait a moment and try again."
+  - Pending checks count against the per-IP limit of 5 wrong tries per 5 minutes, so a burst of 200 parallel logins gets at most 5 checks.
+  - **Global slowdown instead of a global lock-out:** a bucket of 10 wrong tries refills at 1 per second; when it is empty, 429 with `Retry-After: 1`. A correct PIN gives its token back.
+  - A per-IP block still answers 429 "Too many wrong PIN attempts. Wait 5 minutes…" with `Retry-After` up to 300.
+  - `set-pin` and the guide recommend a 6-digit PIN; 4–8 digits are still accepted.
+- **Damaged `config.json`** (empty, unparseable or not an object): writes, `POST /api/auth/login` **and** `GET /api/auth/status` → **503** "Leader settings file is damaged. Run set-pin on the laptop to repair it…".
+  - `set-pin --force` (and `windows/set-pin.bat`) replaces it and keeps the damaged file as `config.json.broken-<time>`.
+  - `set-pin --check` exits 0 = set, 1 = not set, 2 = damaged.
+  - Config writes are fsynced. Expected 503s are not logged as crashes.
+- **Barcodes:**
+  - The JSON value must be a **string**; a number, boolean or object → 400.
+  - **ASCII** letters/digits only, so `ß12` → 400 (it no longer becomes `SS12`).
+  - Stored as given, but compared and kept **unique ignoring leading zeros** (migration v3: unique index on `ltrim(barcode,'0')`). So `012345678905` and `12345678905` are the same barcode for 409s, search ranking and scan matching.
+  - An import row whose barcode differs from the stored one only by leading zeros does not change it.
+- **Import:**
+  - Barcode ownership is planned once, the same way for dry and real runs.
+  - A barcode that an earlier row in the file moved off its item may be taken by a later row. Moved barcodes are freed first inside the transaction.
+- **Scan:**
+  - `text` over 2000 characters is **truncated** server-side, not a 400.
+  - Throttled to **30 requests per minute per IP**; beyond that, 429 with `Retry-After` and `details.retryAfterSeconds`.
+  - The scoring index is cached and rebuilt after any database change.
+  - Codes: an exact match on one OCR word, or on neighbouring words joined back up to the longest code/barcode length (so `T N T - 0 0 4` works).
+  - "Weak" codes (digits only, letters only, or under 4 folded characters) only count on a whole word of the same kind, with score 0.35. So `220`, `2024`, `BOIL` or `011` never win from label noise such as `220-240V`, years, `B O I L` or `OIL`.
+  - An exact whole model gets a bonus over a partial one: `SUNDOME 4P` ranks model "Sundome 4P" above "Sundome 4".
+  - Brand/model allow one Damerau edit, so a swap like `Peztl`/`Petzl` counts as one edit.
+  - Ties are broken by the number of matched fields, then by code.
+- **Tokens:** a signature with extra or junk characters is rejected (only the canonical base64url form is accepted).
+- **Windows:**
+  - `install.ps1` locks the install folder with icacls. Owner is Administrators; SYSTEM and Administrators have full control; Users have read & execute only; inheritance is broken. `backend\data` is readable by SYSTEM and Administrators only.
+  - It records the absolute `node.exe` path in `backend\data\node-path.txt`, and `start.bat` uses only that (never a bare `node`). A per-user Node install is refused with "reinstall for all users".
+  - The firewall rule is Private profile **and** `RemoteAddress LocalSubnet`. The installer offers to remove inbound Block rules for node.exe.
+  - `update.ps1` always tries to restart the task and reports what failed.
+  - New scripts: `start-app` (start without internet), `set-pin`, `settings` (edit `.env` + restart) and `backup-now`, each as `.ps1` + `.bat`.

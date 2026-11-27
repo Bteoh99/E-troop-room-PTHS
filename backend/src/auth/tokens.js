@@ -22,6 +22,8 @@ export function verifyToken(secret, token, { now = Date.now() } = {}) {
   if (!payload || !sig || extra !== undefined) return { ok: false, reason: 'invalid' };
   const expected = mac(secret, payload);
   const got = Buffer.from(sig, 'base64url');
+  // Canonical form only: Buffer.from() ignores junk characters, so "token!" would otherwise pass.
+  if (got.toString('base64url') !== sig) return { ok: false, reason: 'invalid' };
   if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected)) return { ok: false, reason: 'invalid' };
   let data;
   try {

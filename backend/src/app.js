@@ -62,6 +62,10 @@ export function resolveStaticDir(staticDir) {
   return fs.existsSync(path.join(dir, 'index.html')) ? dir : null;
 }
 
+/** Missing files with these extensions are 404s; any other path falls back to the SPA. */
+export const ASSET_EXTENSIONS = new Set(['.js', '.mjs', '.css', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico',
+  '.wasm', '.json', '.map', '.woff', '.woff2', '.ttf', '.txt', '.webmanifest', '.traineddata', '.gz', '.html']);
+
 const EXTRA_TYPES = { '.wasm': 'application/wasm', '.mjs': 'text/javascript; charset=utf-8', '.webmanifest': 'application/manifest+json' };
 
 function frontend(dir) {
@@ -76,10 +80,14 @@ function frontend(dir) {
       res.setHeader('Cache-Control', rel[0] === 'assets' ? 'public, max-age=31536000, immutable' : 'no-cache');
     },
   }));
-  // SPA fallback: client-side routes (/items/3, /map, ...) get index.html. Missing files stay 404.
+  // SPA fallback: client-side routes (/items/3, /items/1.5, /map, ...) get index.html. Only a missing
+  // file with a known asset extension is a real 404 (short plain text).
   const indexFile = path.join(dir, 'index.html');
-  router.get('*', (req, res, next) => {
-    if (path.extname(req.path)) return next();
+  router.get('*', (req, res) => {
+    if (ASSET_EXTENSIONS.has(path.extname(req.path).toLowerCase())) {
+      res.status(404).type('text/plain').send('Not found');
+      return;
+    }
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(indexFile);
   });
@@ -91,7 +99,7 @@ function frontend(dir) {
  * Tests: `createApp(openDb(':memory:'), { configPath })` for an isolated DB, or import the default `app`
  * (which opens DB_PATH / CONFIG_PATH on first use).
  * @param {import('better-sqlite3').Database} [db]
- * @param {{ configPath?: string, staticDir?: string|false, limiter?: object }} [opts]
+ * @param {{ configPath?: string, staticDir?: string|false, limiter?: object, scan?: { perMinute?: number } }} [opts]
  */
 export function createApp(db = openDb(), opts = {}) {
   const app = express();
@@ -115,7 +123,7 @@ export function createApp(db = openDb(), opts = {}) {
   api.use('/categories', categoriesRouter(db));
   api.use('/racks', racksRouter(db));
   api.use('/import', writesNeedLeader, importRouter(db)); // template download (GET) stays public
-  api.use('/scan', scanRouter(db)); // public
+  api.use('/scan', scanRouter(db, opts.scan)); // public, throttled per IP
   api.use((req, res) => {
     res.status(404).json({ error: { message: `No route for ${req.method} ${req.baseUrl}${req.path}` } });
   });
@@ -128,7 +136,7 @@ export function createApp(db = openDb(), opts = {}) {
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     const { status, body } = toErrorResponse(err);
-    if (status >= 500) console.error(err);
+    if (status >= 500 && !(err instanceof HttpError)) console.error(err); // expected 503s are not crashes
     res.status(status).json(body);
   });
 
@@ -158,7 +166,11 @@ function toErrorResponse(err) {
   if (Number.isInteger(status) && status >= 400 && status < 500) {
     return { status: status === 413 ? 413 : 400, body: body(err.expose && err.message ? err.message : 'Bad request') };
   }
-  if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') return { status: 409, body: body('Duplicate item code or barcode') };
+  if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    // Two writes raced past the checked path; still say which field clashed.
+    const field = /barcode/.test(err.message) ? 'barcode' : 'code';
+    return { status: 409, body: body(`Duplicate item ${field}`, { field }) };
+  }
   return { status: 500, body: body('Internal server error') };
 }
 

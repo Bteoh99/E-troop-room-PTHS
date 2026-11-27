@@ -25,6 +25,7 @@ export const isValidPin = (pin) => typeof pin === 'string' && /^\d{4,8}$/.test(p
 /** Read config; a missing file is an empty config. A corrupt file throws (never silently "no PIN"). */
 export function readConfig(file) {
   let text;
+  // An empty or unparseable file throws: it must never be read as "no PIN".
   try {
     text = fs.readFileSync(file, 'utf8');
   } catch (err) {
@@ -32,15 +33,29 @@ export function readConfig(file) {
     throw err;
   }
   const cfg = JSON.parse(text);
-  return cfg && typeof cfg === 'object' ? cfg : {};
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('not a settings object');
+  return cfg;
 }
 
 /** Atomic write (temp file + rename), readable by the owner only where the OS supports it. */
 export function writeConfig(file, cfg) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeSync(fd, JSON.stringify(cfg, null, 2) + '\n');
+    fs.fsyncSync(fd); // a power cut must not leave an empty config.json behind
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
+}
+
+export class ConfigDamagedError extends Error {
+  constructor(file, cause) {
+    super(`The leader settings file ${file} is damaged (${cause.message}).`);
+    this.code = 'CONFIG_DAMAGED';
+  }
 }
 
 export function hashPin(pin, params = {}) {
@@ -66,10 +81,20 @@ export function verifyPin(pin, rec) {
  * @param {string} file config path
  * @param {string} pin 4-8 digits
  * @param {object} [scryptParams] tests use a cheap N
+ * @param {{ force?: boolean }} [opts] force: replace a damaged config.json (it is renamed to .broken-<time> first)
  */
-export function setPin(file, pin, scryptParams) {
+export function setPin(file, pin, scryptParams, { force = false } = {}) {
   if (!isValidPin(pin)) throw new Error('The PIN must be 4 to 8 digits.');
-  const cfg = readConfig(file);
+  let cfg;
+  try {
+    cfg = readConfig(file);
+  } catch (err) {
+    if (!force) throw new ConfigDamagedError(file, err);
+    // Repair: keep the damaged file for inspection, start again from an empty config.
+    const kept = `${file}.broken-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.renameSync(file, kept);
+    cfg = {};
+  }
   cfg.pin = hashPin(pin, scryptParams);
   cfg.tokenSecret = crypto.randomBytes(32).toString('base64');
   cfg.pinUpdatedAt = new Date().toISOString();

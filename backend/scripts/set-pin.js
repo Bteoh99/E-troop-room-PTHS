@@ -3,10 +3,13 @@
  *   npm run set-pin                 asks twice, input hidden
  *   npm run set-pin -- --pin 1234   non-interactive (for install scripts)
  *   npm run set-pin -- --check      exit code 0 if a PIN is set, 1 if not
+ *   add --force to repair a damaged config.json (the damaged file is kept as config.json.broken-<time>)
  * Changing the PIN signs out every leader (all tokens stop working).
+ * Note: with --pin, npm prints the command line (and the PIN) and your shell may keep it in its
+ * history; the hidden prompt is safer.
  */
 import '../src/loadEnv.js';
-import { isValidPin, readConfig, resolveConfigPath, setPin } from '../src/auth/config.js';
+import { isValidPin, readConfig, resolveConfigPath, setPin, SCRYPT_DEFAULTS } from '../src/auth/config.js';
 
 const args = process.argv.slice(2);
 const argValue = (name) => {
@@ -53,7 +56,11 @@ function askHidden(question) {
 async function main() {
   const file = resolveConfigPath();
   if (args.includes('--help') || args.includes('-h')) {
-    console.log('Usage: npm run set-pin [-- --pin 1234 | --check]');
+    console.log('Usage: npm run set-pin [-- --pin 123456 | --check] [--force]');
+    console.log('  (no options)  ask for the PIN twice, digits hidden (recommended)');
+    console.log('  --pin 123456  non-interactive; WARNING: npm prints this command line, so the PIN shows on screen and in shell history');
+    console.log('  --check       exit code 0 if a PIN is set, 1 if not');
+    console.log('  --force       repair a damaged settings file (it is kept as config.json.broken-<time>)');
     return 0;
   }
   if (args.includes('--check')) {
@@ -62,8 +69,8 @@ async function main() {
       const cfg = readConfig(file);
       set = Boolean(cfg.pin && cfg.tokenSecret);
     } catch (err) {
-      console.log(`Leader PIN: cannot read ${file} (${err.message})`);
-      return 1;
+      console.log(`Leader PIN: settings file is damaged (${err.message}). Repair: npm run set-pin -- --force`);
+      return 2;
     }
     console.log(set ? 'Leader PIN: set' : 'Leader PIN: not set');
     return set ? 0 : 1;
@@ -75,7 +82,8 @@ async function main() {
       console.error('No terminal to type into. Use: npm run set-pin -- --pin 1234');
       return 1;
     }
-    console.log('Choose the leader PIN: 4 to 8 digits. Leaders type it on their phones to add, edit or import items.');
+    console.log('Choose the leader PIN: 4 to 8 digits; 6 digits are recommended (much harder to guess than 4).');
+    console.log('Leaders type it on their phones to add, edit or import items.');
     for (;;) {
       const first = (await askHidden('New leader PIN: ')).trim();
       if (!isValidPin(first)) {
@@ -96,7 +104,16 @@ async function main() {
     console.error('The PIN must be 4 to 8 digits (numbers only).');
     return 1;
   }
-  setPin(file, pin);
+  try {
+    setPin(file, pin, SCRYPT_DEFAULTS, { force: args.includes('--force') });
+  } catch (err) {
+    if (err.code === 'CONFIG_DAMAGED') {
+      console.error(`${err.message}\nRun it again with --force to replace it (the damaged file is kept): npm run set-pin -- --force`);
+      return 1;
+    }
+    throw err;
+  }
+  if (pin.length < 6) console.log('Tip: a 6-digit PIN is much harder to guess than a 4-digit one.');
   console.log(`Leader PIN saved (${file}). Leaders must unlock leader mode again on their phones.`);
   return 0;
 }

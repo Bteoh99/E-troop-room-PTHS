@@ -10,7 +10,8 @@ import { findHeaderRow } from '../lib/headers.js';
 import { badRequest, HttpError } from '../lib/errors.js';
 import { checkXlsx } from '../lib/xlsxGuard.js';
 import { updateItemSchema } from '../lib/itemSchema.js';
-import { buildNewItem, createItem, getItemByBarcode, getItemByCode, mergeItem, updateItem } from './items.js';
+import { buildNewItem, clearBarcode, createItem, getItemByBarcode, getItemByCode, mergeItem, updateItem } from './items.js';
+import { barcodeKey } from '../lib/scanMatch.js';
 
 export const MAX_IMPORT_ROWS = 20_000; // data rows (after the header)
 export const PREVIEW_ROWS = 20;
@@ -149,20 +150,31 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
 
   // 1) Work out every code's final state in memory (identical for dry and real runs).
   const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (final) }
-  const barcodeOwner = new Map(); // barcode -> code, for barcodes set by this file
+  // The file's view of barcode ownership (key ignores leading zeros): code, or null when a row moved
+  // that barcode off its item. Anything not in here is looked up in the DB. Dry and real runs use
+  // exactly this same planning, so their results agree.
+  const barcodeOwner = new Map();
+  const ownerOf = (bc) => {
+    const k = barcodeKey(bc);
+    return barcodeOwner.has(k) ? barcodeOwner.get(k) : getItemByBarcode(db, bc)?.code ?? null;
+  };
   for (const { row, data } of plan.records) {
     const code = data.code.toUpperCase();
-    if (data.barcode) {
-      // A barcode identifies one item: never steal it from another item (DB or earlier row).
-      const owner = barcodeOwner.get(data.barcode) ?? getItemByBarcode(db, data.barcode)?.code;
-      if (owner && owner !== code) {
-        errors.push({ row, message: `Warning: barcode ${data.barcode} already belongs to item ${owner}; barcode not changed` });
-        delete data.barcode;
-      } else barcodeOwner.set(data.barcode, code);
-    }
     const entry = byCode.get(code);
     const original = entry ? entry.original : getItemByCode(db, code);
     const current = entry ? entry.item : original;
+    if (data.barcode) {
+      if (current?.barcode && barcodeKey(current.barcode) === barcodeKey(data.barcode)) {
+        delete data.barcode; // same barcode (e.g. Excel dropped a leading zero): keep the stored spelling
+      } else {
+        // A barcode identifies one item: never take it from another item (DB or earlier row).
+        const owner = ownerOf(data.barcode);
+        if (owner && owner !== code) {
+          errors.push({ row, message: `Warning: barcode ${data.barcode} already belongs to item ${owner}; barcode not changed` });
+          delete data.barcode;
+        }
+      }
+    }
     let item;
     try {
       item = current ? mergeItem(current, updateItemSchema.parse(data)) : buildNewItem(data);
@@ -172,6 +184,10 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
       errors.push({ row, message: `${msg}; row skipped` });
       skipped++;
       continue;
+    }
+    if (current?.barcode !== item.barcode) {
+      if (current?.barcode) barcodeOwner.set(barcodeKey(current.barcode), null);
+      if (item.barcode) barcodeOwner.set(barcodeKey(item.barcode), code);
     }
     if (entry) {
       errors.push({ row, message: `Warning: code ${code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
@@ -183,9 +199,13 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
   }
 
   // 2) Real run: one write per code, all in one transaction. Unchanged items are not written,
-  //    even when several rows changed them and changed them back.
+  //    even when several rows changed them and changed them back. Barcodes that move are freed
+  //    first, so the write order can never trip the unique index.
   if (!dryRun) {
     db.transaction(() => {
+      for (const { original, item } of byCode.values()) {
+        if (original?.barcode && original.barcode !== item.barcode) clearBarcode(db, original.id);
+      }
       for (const entry of byCode.values()) {
         const values = Object.fromEntries(COMPARED.map((k) => [k, entry.item[k]]));
         if (!entry.original) entry.item = createItem(db, values);

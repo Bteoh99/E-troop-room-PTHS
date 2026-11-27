@@ -42,4 +42,14 @@ export const migrations = [
       CREATE UNIQUE INDEX IF NOT EXISTS idx_items_barcode ON items (barcode) WHERE barcode IS NOT NULL;
     `,
   },
+  {
+    // Barcodes are unique ignoring leading zeros: a UPC "012345678905" that lost its leading zero in a
+    // numeric Excel cell is the same barcode. Stored as given; compared with ltrim(barcode, '0').
+    version: 3,
+    name: 'barcode unique ignoring leading zeros',
+    sql: `
+      DROP INDEX IF EXISTS idx_items_barcode;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_items_barcode_key ON items (ltrim(barcode, '0')) WHERE barcode IS NOT NULL;
+    `,
+  },
 ];

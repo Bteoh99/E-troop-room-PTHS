@@ -277,14 +277,17 @@ describe('C. PIN rate limiting (default limiter, fake clock)', () => {
     expect((await login('10.0.0.1', TEST_PIN)).status).toBe(200);
   });
 
-  it('global cap: 20 wrong tries from 5 IPs (4 each, none blocked alone) blocks everyone for 5 minutes', async () => {
+  // fix round (lead decision 2): the global 20-wrong / 5-minute lock-out became a global SLOWDOWN
+  // (bucket of 10 wrong tries, refilling 1 per second), so nobody can lock every leader out for minutes.
+  it('global slowdown: after 10 wrong tries from many IPs everyone waits ~1 s (not 5 minutes)', async () => {
     for (let ip = 1; ip <= 5; ip++) {
-      for (let i = 0; i < 4; i++) expect((await login(`10.0.1.${ip}`, '0000')).status).toBe(401);
+      for (let i = 0; i < 2; i++) expect((await login(`10.0.1.${ip}`, '0000')).status).toBe(401);
     }
     const r = await login('10.9.9.9', TEST_PIN); // never tried before
     expect(r.status).toBe(429);
-    expect(r.headers['retry-after']).toBe('300');
-    vi.setSystemTime(new Date('2026-11-26T10:05:00.001Z'));
+    expectErrorShape(expect, r.body);
+    expect(Number(r.headers['retry-after'])).toBeLessThanOrEqual(1);
+    vi.setSystemTime(new Date('2026-11-26T10:00:01.000Z'));
     expect((await login('10.9.9.9', TEST_PIN)).status).toBe(200);
   });
 
@@ -399,13 +402,13 @@ describe('A. brand / model / barcode CRUD', () => {
     ['9 312345 678901', '9312345678901'],
     ['  0765 0112 345a ', '07650112345A'],
     ['\t12\n34', '1234'],
-    [9312345678901, '9312345678901'],
     ['abcDEF123', 'ABCDEF123'],
   ])('barcode %j is normalized to %s', async (input, expected) => {
     expect((await post({ code: 'A', name: 'a', barcode: input })).body.barcode).toBe(expected);
   });
 
-  it.each(['abc-1', '9312345.678', 'é123', '１２３', '١٢٣', '<x>', '1'.repeat(65)])('barcode %j -> 400', async (input) => {
+  // fix round (lead decision 11): a JSON number is rejected (it may already have lost digits/leading zeros); ASCII only (no ß -> SS)
+  it.each(['abc-1', '9312345.678', 'é123', '１２３', '١٢٣', '<x>', '1'.repeat(65), 9312345678901, 'ß12'])('barcode %j -> 400', async (input) => {
     const res = await post({ code: 'A', name: 'a', barcode: input });
     expect(res.status).toBe(400);
     expect(res.body.error.details.map((d) => d.path)).toContain('barcode');
@@ -582,7 +585,8 @@ describe('A. migration v1 -> v2 keeps data', () => {
     const db = openDb(file);
     const after = db.prepare('SELECT * FROM items ORDER BY id').all();
     expect(after).toEqual(before.map((r) => ({ ...r, brand: null, model: null, barcode: null })));
-    expect(db.prepare('SELECT version FROM schema_version ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }]);
+    // fix round: migration v3 (barcode unique ignoring leading zeros) was added after v2
+    expect(db.prepare('SELECT version FROM schema_version ORDER BY version').all()).toEqual(migrations.map((m) => ({ version: m.version })));
     expect(db.prepare("SELECT applied_at FROM schema_version WHERE version = 1").get().applied_at).toBe('2026-01-01T00:00:00.000Z');
 
     const leader = makeLeaderConfig();
@@ -597,7 +601,7 @@ describe('A. migration v1 -> v2 keeps data', () => {
     db.close();
 
     const again = openDb(file); // re-open: no-op
-    expect(again.prepare('SELECT COUNT(*) n FROM schema_version').get().n).toBe(2);
+    expect(again.prepare('SELECT COUNT(*) n FROM schema_version').get().n).toBe(migrations.length);
     again.close();
   });
 });
@@ -695,7 +699,7 @@ describe('B. POST /api/scan/match', () => {
     [{}],
     [{ text: '' }],
     [{ text: '   \n\t ' }],
-    [{ text: 'x'.repeat(2001) }],
+    // fix round (lead decision 12): text over 2000 characters is truncated server-side, not a 400
     [{ barcode: '1'.repeat(65) }],
     [{ barcode: '   ' }],
     [{ text: 5 }],

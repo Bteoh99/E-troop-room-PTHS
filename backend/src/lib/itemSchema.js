@@ -11,11 +11,14 @@ export const LIMITS = {
   brand: 100, model: 100, barcode: 64,
 };
 
-/** "9 312345 678901" -> "9312345678901"; letters upper-cased. '' -> null. Non-strings untouched. */
+/**
+ * "9 312345 678901" -> "9312345678901": whitespace removed, ASCII letters upper-cased, '' -> null.
+ * Anything that is not a string (e.g. a JSON number, which may already have lost digits) is left
+ * as-is so validation rejects it.
+ */
 export function normalizeBarcode(v) {
-  if (typeof v === 'number') v = String(v);
   if (typeof v !== 'string') return v;
-  const t = v.replace(/\s+/g, '').toUpperCase();
+  const t = v.replace(/\s+/g, '').replace(/[a-z]/g, (c) => c.toUpperCase());
   return t === '' ? null : t;
 }
 
@@ -45,9 +48,9 @@ const fields = {
   model: z.preprocess(asNullableText, z.string().max(LIMITS.model, `Model must be at most ${LIMITS.model} characters`).nullable()),
   barcode: z.preprocess(
     normalizeBarcode,
-    z.string()
+    z.string({ error: 'Barcode must be text (put it in quotes), not a number' })
       .max(LIMITS.barcode, `Barcode must be at most ${LIMITS.barcode} characters`)
-      .regex(/^[A-Z0-9]+$/, 'Barcode may only contain letters and digits')
+      .regex(/^[A-Z0-9]+$/, 'Barcode may only contain the letters A-Z and digits 0-9')
       .nullable()
   ),
   quantity: z.preprocess(

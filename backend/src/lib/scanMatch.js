@@ -2,11 +2,18 @@
  * Scan matching (pure, no I/O): score items against noisy OCR text from a photo of the item's own
  * manufacturer label, and/or a decoded shop barcode.
  *
- * - Codes are compared "OCR-folded": upper-cased, O->0, I/L->1, S->5, B->8, Z->2, RN->M, and
- *   separators (- _ space . /) removed, on both sides. So "TNT-OO4", "TNT 004" and "tnt004" all find TNT-004.
- *   Codes split over several OCR words are found by joining up to 5 neighbouring words.
- * - Brand/model words of 5+ characters may differ by one edit (OCR typo).
- * - Weights: code > barcode > model > brand > name > category/notes.
+ * Codes
+ * - Compared "OCR-folded": upper-cased, separators (- _ space . / \) removed, RN->M, O->0, I/L->1,
+ *   S->5, B->8, Z->2 — on both sides. So "TNT-OO4", "TNT 004", "tnt004" and "T N T - 0 0 4" all find TNT-004.
+ * - A code counts only on exact equality with ONE OCR word, or with neighbouring words joined back
+ *   together (joined up to the length of the longest code/barcode in the inventory).
+ * - "Weak" codes — digits only, letters only, or shorter than 4 folded characters — are easily hit by
+ *   label noise ("220-240V", "2024", "OIL"->"011"). They only count on a whole single word of the same
+ *   kind (a digit code needs a word with digits; a letter code the same word, unfolded), and only with
+ *   a low weight, so they can never outrank a real match.
+ * Barcodes compare with leading zeros ignored (a UPC that lost its leading 0 in Excel still matches).
+ * Brand/model words of 5+ characters may differ by one edit (Damerau: a swap of two neighbours counts 1).
+ * Weights: code > barcode > model (exact whole model gets a bonus) > brand > name > category/notes.
  */
 
 /** OCR noise and label boilerplate that says nothing about which item it is. */
@@ -17,12 +24,16 @@ export const STOPWORDS = new Set([
   'or', 'on', 'at', 'be', 'it', 'pcs', 'pc', 'set', 'qty', 'kod', 'buatan', 'dan', 'untuk', 'serial',
 ]);
 
-export const WEIGHTS = { code: 1, barcode: 0.95, model: 0.5, brand: 0.3, name: 0.3, category: 0.08, notes: 0.08 };
+export const WEIGHTS = {
+  code: 1, weakCode: 0.35, barcode: 0.95, model: 0.5, exactModel: 0.1, brand: 0.3, name: 0.3, category: 0.08, notes: 0.08,
+};
 /** Below this an item is not a "sensible" match. */
 export const MIN_SCORE = 0.15;
 export const MAX_MATCHES = 10;
-/** Codes split by OCR into up to this many words ("TNT - 0 0 4") are joined back. */
-const MAX_WINDOW = 5;
+/** OCR text beyond this is ignored (the route truncates instead of rejecting). */
+export const MAX_TEXT = 2000;
+/** Joined-word windows never grow beyond this many folded characters. */
+const MAX_JOIN = 64;
 
 const OCR_MAP = { O: '0', I: '1', L: '1', S: '5', B: '8', Z: '2' };
 
@@ -33,6 +44,12 @@ export function ocrFold(s) {
     .replace(/[\s\-_./\\]+/g, '')
     .replace(/RN/g, 'M') // OCR reads "m" as "rn" very often
     .replace(/[OILSBZ]/g, (c) => OCR_MAP[c]);
+}
+
+/** Barcode comparison key: upper-case, no whitespace, leading zeros ignored ("0012" ~ "12"). */
+export function barcodeKey(s) {
+  const t = String(s ?? '').replace(/\s+/g, '').toUpperCase();
+  return t.replace(/^0+(?=.)/, '');
 }
 
 /** Words of letters/digits, lower-cased. Keeps short words (needed to rebuild split codes). */
@@ -53,138 +70,187 @@ export function tokenize(text) {
   return out;
 }
 
-/** True when a and b differ by at most one insertion, deletion or substitution. */
+/**
+ * True when a and b differ by at most one edit: insertion, deletion, substitution, or a swap of two
+ * neighbouring characters (optimal string alignment / Damerau, so "peztl" ~ "petzl").
+ */
 export function withinOneEdit(a, b) {
   if (a === b) return true;
   const la = a.length;
   const lb = b.length;
   if (Math.abs(la - lb) > 1) return false;
-  let i = 0;
-  let j = 0;
-  let edits = 0;
-  while (i < la && j < lb) {
-    if (a[i] === b[j]) {
-      i++;
-      j++;
-      continue;
-    }
-    if (++edits > 1) return false;
-    if (la > lb) i++;
-    else if (lb > la) j++;
-    else {
-      i++;
-      j++;
-    }
+  if (la === lb) {
+    let i = 0;
+    while (i < la && a[i] === b[i]) i++;
+    if (a.slice(i + 1) === b.slice(i + 1)) return true; // one substitution
+    return i + 1 < la && a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2); // swap
   }
-  return edits + (la - i) + (lb - j) <= 1;
+  const [s, l] = la < lb ? [a, b] : [b, a];
+  let i = 0;
+  while (i < s.length && s[i] === l[i]) i++;
+  return s.slice(i) === l.slice(i + 1); // one insertion/deletion
+}
+
+const hasDigit = (s) => /\d/.test(s);
+const hasLetter = (s) => /\p{L}/u.test(s);
+
+/** Pre-compute everything matching needs from the inventory (cache this; rebuild after writes). */
+export function buildScanIndex(items) {
+  let maxLen = 0;
+  const entries = items.map((item) => {
+    const code = ocrFold(item.code);
+    const raw = String(item.code ?? '').replace(/[\s\-_./\\]+/g, '');
+    const weak = code.length < 4 || !hasDigit(raw) || !hasLetter(raw);
+    const bc = item.barcode ? ocrFold(barcodeKey(item.barcode)).replace(/^0+(?=.)/, '') : null;
+    maxLen = Math.max(maxLen, code.length, bc ? item.barcode.length : 0);
+    return {
+      item,
+      code,
+      weak,
+      codeKind: weak ? (!hasLetter(raw) ? 'digits' : !hasDigit(raw) ? 'letters' : 'short') : 'strong',
+      codeLower: raw.toLowerCase(),
+      barcode: bc && bc.length >= 6 ? bc : null,
+      modelWhole: item.model ? ocrFold(item.model) : null,
+      // every word counts for brand/model (also short ones like the "4" in "Sundome 4"), so a
+      // partial model never ties with an exact one
+      model: item.model ? [...new Set(words(item.model).map(ocrFold))] : [],
+      brand: item.brand ? [...new Set(words(item.brand).map(ocrFold))] : [],
+      name: item.name ? tokenize(item.name) : [],
+      category: item.category ? tokenize(item.category) : [],
+      notes: item.notes ? tokenize(item.notes) : [],
+    };
+  });
+  return { entries, maxLen: Math.min(Math.max(maxLen, 4), MAX_JOIN) };
 }
 
 /**
- * Pre-compute what the item scoring needs from the text: tokens, folded tokens and folded
- * windows of 1-5 neighbouring raw words (so "TNT 0O4" still yields "TNT004").
+ * Analyse OCR text once per request.
+ * - singles: each word (folded) and its raw lower-case form
+ * - joined: neighbouring words joined back (2+ words), folded, up to maxLen characters
  */
-export function analyzeText(text) {
-  const raw = words(text).slice(0, 2000);
-  const windows = new Set();
+export function analyzeText(text, maxLen = 20) {
+  const raw = words(String(text ?? '').slice(0, MAX_TEXT));
+  const singles = new Set(raw.map(ocrFold));
+  const rawSet = new Set(raw);
+  const digitWords = new Set(raw.filter(hasDigit).map(ocrFold));
+  const joined = new Set();
   for (let i = 0; i < raw.length; i++) {
-    let joined = '';
-    for (let k = 0; k < MAX_WINDOW && i + k < raw.length; k++) {
-      joined += raw[i + k];
-      windows.add(ocrFold(joined));
+    let s = ocrFold(raw[i]);
+    for (let j = i + 1; j < raw.length; j++) {
+      s += ocrFold(raw[j]);
+      if (s.length > maxLen) break;
+      joined.add(s);
     }
   }
-  const tokens = tokenize(text);
-  return { tokens, tokenSet: new Set(tokens), foldedTokens: new Set(tokens.map(ocrFold)), windows };
+  const zeroless = (set) => new Set([...set].map((w) => w.replace(/^0+(?=.)/, '')));
+  const tokens = tokenize(raw.join(' '));
+  return {
+    tokens,
+    tokenSet: new Set(tokens),
+    foldedTokens: new Set(tokens.map(ocrFold)),
+    singles,
+    rawSet,
+    digitWords,
+    joined,
+    barcodeWindows: zeroless(new Set([...singles, ...joined])),
+    empty: raw.length === 0,
+  };
 }
 
-/** Fraction of the field's meaningful words found in the text (exact, or fuzzy for 5+ chars). */
-function wordOverlap(fieldText, analysis, { fuzzy = false, fold = false } = {}) {
-  const fieldTokens = tokenize(fieldText);
+/**
+ * Fraction of the field's words found in the text: exact (in `pool`), or for 5+ characters one edit
+ * away from a word in `fuzzyPool` (the <= 200 meaningful tokens, so this stays fast).
+ */
+function overlap(fieldTokens, pool, fuzzyPool = null) {
   if (fieldTokens.length === 0) return 0;
   let hit = 0;
-  for (const t of fieldTokens) {
-    const key = fold ? ocrFold(t) : t;
-    const pool = fold ? analysis.foldedTokens : analysis.tokenSet;
-    if (pool.has(key)) hit++;
-    else if (fuzzy && key.length >= 5) {
-      for (const cand of pool) {
+  let longHit = false; // 1-character words (the "4" in "Sundome 4") only count next to a real word
+  for (const key of fieldTokens) {
+    let found = pool.has(key);
+    if (!found && fuzzyPool && key.length >= 5) {
+      for (const cand of fuzzyPool) {
         if (cand.length >= 4 && withinOneEdit(key, cand)) {
-          hit++;
+          found = true;
           break;
         }
       }
     }
+    if (found) {
+      hit++;
+      if (key.length >= 2) longHit = true;
+    }
   }
-  return hit / fieldTokens.length;
+  return longHit ? hit / fieldTokens.length : 0;
+}
+
+function codeMatch(e, a) {
+  if (!e.code) return 0;
+  if (!e.weak) return a.singles.has(e.code) || a.joined.has(e.code) ? WEIGHTS.code : 0;
+  // Weak codes: one whole word of the same kind only.
+  if (e.codeKind === 'letters') return e.codeLower.length >= 2 && a.rawSet.has(e.codeLower) ? WEIGHTS.weakCode : 0;
+  return a.digitWords.has(e.code) ? WEIGHTS.weakCode : 0;
 }
 
 /**
- * Score one item. Returns { score (0..1), matchedOn: string[] }.
- * @param {object} item  API Item (code, name, brand, model, barcode, category, notes)
- * @param {ReturnType<typeof analyzeText>} analysis
+ * Score one index entry. Returns { score (0..1), matchedOn: string[] }.
+ * @param {ReturnType<typeof buildScanIndex>['entries'][number]} e
+ * @param {ReturnType<typeof analyzeText>} a
  */
-export function scoreItem(item, analysis) {
+export function scoreEntry(e, a) {
   const matchedOn = [];
   let score = 0;
-
-  const code = ocrFold(item.code);
-  if (code.length >= 3 && analysis.windows.has(code)) {
-    score += WEIGHTS.code;
-    matchedOn.push('code');
-  }
-  if (item.barcode && analysis.windows.has(ocrFold(item.barcode))) {
-    score += WEIGHTS.barcode;
-    matchedOn.push('barcode');
-  }
-  if (item.model) {
-    const whole = ocrFold(item.model);
-    const frac = whole.length >= 3 && analysis.windows.has(whole) ? 1 : wordOverlap(item.model, analysis, { fuzzy: true, fold: true });
-    if (frac > 0) {
-      score += WEIGHTS.model * frac;
-      matchedOn.push('model');
-    }
-  }
-  if (item.brand) {
-    const frac = wordOverlap(item.brand, analysis, { fuzzy: true, fold: true });
-    if (frac > 0) {
-      score += WEIGHTS.brand * frac;
-      matchedOn.push('brand');
-    }
-  }
-  for (const field of ['name', 'category', 'notes']) {
-    const frac = item[field] ? wordOverlap(item[field], analysis) : 0;
-    if (frac > 0) {
-      score += WEIGHTS[field] * frac;
+  const add = (field, value) => {
+    if (value > 0) {
+      score += value;
       matchedOn.push(field);
     }
+  };
+  add('code', codeMatch(e, a));
+  if (e.barcode) add('barcode', a.barcodeWindows.has(e.barcode) ? WEIGHTS.barcode : 0);
+  if (e.modelWhole) {
+    // The whole model, exactly (folded), beats a partial match: "Sundome 4P" > "Sundome 4" for "SUNDOME 4P".
+    const whole = e.modelWhole.length >= 4 && (a.singles.has(e.modelWhole) || a.joined.has(e.modelWhole));
+    add('model', whole ? WEIGHTS.model + WEIGHTS.exactModel : WEIGHTS.model * overlap(e.model, a.singles, a.foldedTokens));
   }
+  add('brand', WEIGHTS.brand * overlap(e.brand, a.singles, a.foldedTokens));
+  add('name', WEIGHTS.name * overlap(e.name, a.tokenSet));
+  add('category', WEIGHTS.category * overlap(e.category, a.tokenSet));
+  add('notes', WEIGHTS.notes * overlap(e.notes, a.tokenSet));
   return { score: Math.min(1, Math.round(score * 1000) / 1000), matchedOn };
 }
 
+/** Back-compat helper: score a single Item. */
+export function scoreItem(item, text) {
+  const index = buildScanIndex([item]);
+  return scoreEntry(index.entries[0], analyzeText(text, index.maxLen));
+}
+
 /**
- * @param {object[]} items  all candidate Items
- * @param {{ text?: string, barcode?: string|null }} input  barcode already normalized (no spaces, upper-case)
+ * @param {object[] | ReturnType<typeof buildScanIndex>} itemsOrIndex  Items, or a prebuilt index
+ * @param {{ text?: string, barcode?: string|null }} input  barcode: no spaces, upper-case
  * @returns {{ matches: { item: object, score: number, matchedOn: string[] }[], query: { tokens: string[], barcode?: string } }}
  */
-export function matchItems(items, { text = '', barcode = null } = {}) {
-  const analysis = analyzeText(text);
-  const query = { tokens: analysis.tokens, ...(barcode ? { barcode } : {}) };
+export function matchItems(itemsOrIndex, { text = '', barcode = null } = {}) {
+  const index = Array.isArray(itemsOrIndex) ? buildScanIndex(itemsOrIndex) : itemsOrIndex;
+  const a = analyzeText(text, index.maxLen);
+  const query = { tokens: a.tokens, ...(barcode ? { barcode } : {}) };
 
   if (barcode) {
-    const exact = items.find((it) => it.barcode && it.barcode === barcode);
-    if (exact) return { matches: [{ item: exact, score: 1, matchedOn: ['barcode'] }], query };
+    const key = barcodeKey(barcode);
+    const exact = index.entries.find((e) => e.item.barcode && barcodeKey(e.item.barcode) === key);
+    if (exact) return { matches: [{ item: exact.item, score: 1, matchedOn: ['barcode'] }], query };
     // A shop barcode may also have been used as the troop's own item code.
     const folded = ocrFold(barcode);
-    const byCode = items.find((it) => ocrFold(it.code) === folded);
-    if (byCode) return { matches: [{ item: byCode, score: 1, matchedOn: ['code'] }], query };
+    const byCode = index.entries.find((e) => e.code === folded);
+    if (byCode) return { matches: [{ item: byCode.item, score: 1, matchedOn: ['code'] }], query };
   }
-  if (analysis.windows.size === 0) return { matches: [], query };
+  if (a.empty) return { matches: [], query };
 
   const matches = [];
-  for (const item of items) {
-    const { score, matchedOn } = scoreItem(item, analysis);
-    if (score >= MIN_SCORE) matches.push({ item, score, matchedOn });
+  for (const e of index.entries) {
+    const { score, matchedOn } = scoreEntry(e, a);
+    if (score >= MIN_SCORE) matches.push({ item: e.item, score, matchedOn });
   }
-  matches.sort((a, b) => b.score - a.score || a.item.code.localeCompare(b.item.code));
+  matches.sort((x, y) => y.score - x.score || y.matchedOn.length - x.matchedOn.length || x.item.code.localeCompare(y.item.code));
   return { matches: matches.slice(0, MAX_MATCHES), query };
 }

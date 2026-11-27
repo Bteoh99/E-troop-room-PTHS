@@ -32,8 +32,8 @@ describe('A. migration v2', () => {
     const cols = db.prepare('PRAGMA table_info(items)').all().map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(['brand', 'model', 'barcode']));
     expect(db.prepare('SELECT MAX(version) v FROM schema_version').get().v).toBe(migrations.at(-1).version);
-    const idx = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_items_barcode'").get();
-    expect(idx.sql).toMatch(/UNIQUE/i);
+    const idx = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_items_barcode_key'").get(); // v3
+    expect(idx.sql).toMatch(/UNIQUE.*ltrim\(barcode, '0'\)/is);
   });
 
   it('an existing v1 database is upgraded in place, keeping its items', () => {
@@ -206,7 +206,7 @@ describe('B. POST /api/scan/match', () => {
     expect(res.body.matches).toEqual([]);
   });
 
-  it.each([[{}], [{ text: '   ' }], [{ text: 'x'.repeat(2001) }], [{ barcode: 'x'.repeat(65) }], [{ text: 5 }]])('invalid %j -> 400', async (body) => {
+  it.each([[{}], [{ text: '   ' }], [{ barcode: 'x'.repeat(65) }], [{ text: 5 }], [{ barcode: 9312345678901 }]])('invalid %j -> 400', async (body) => {
     const res = await scan(body);
     expect(res.status).toBe(400);
     expectErrorShape(expect, res.body);
@@ -322,17 +322,30 @@ describe('C. leader PIN', () => {
     expect((await login(TEST_PIN)).status).toBe(200);
   });
 
-  it('rate limit: a correct PIN clears the count; global cap of 20 wrong tries / 5 min', () => {
+  it('limiter: checks are reserved before scrypt; correct PIN clears the count; global slowdown, not lock-out', () => {
     let clock = 0;
     const l = createLoginLimiter({ now: () => clock });
-    for (let i = 0; i < 4; i++) l.fail('a');
-    l.success('a');
-    l.fail('a');
-    expect(l.check('a').blocked).toBe(false);
-    for (let i = 0; i < 15; i++) l.fail(`ip${i}`); // 5 from 'a' + 15 others = 20 wrong tries in the window
-    expect(l.check('somebody-else')).toMatchObject({ blocked: true });
-    clock += 5 * 60 * 1000;
-    expect(l.check('somebody-else').blocked).toBe(false);
+    const fail = (ip) => l.begin(ip).done('fail');
+    // one check in flight per IP: a second parallel attempt is refused straight away
+    const first = l.begin('a');
+    expect(first.ok).toBe(true);
+    expect(l.begin('a')).toMatchObject({ ok: false, reason: 'busy', retryAfterSec: 1 });
+    first.done('fail');
+    for (let i = 0; i < 3; i++) fail('a');
+    l.begin('a').done('ok'); // correct PIN resets 'a'
+    fail('a');
+    expect(l.begin('a').ok).toBe(true); // (left in flight on purpose)
+    // two checks in flight globally
+    const b = l.begin('b');
+    expect(b.ok).toBe(true);
+    expect(l.begin('c')).toMatchObject({ ok: false, reason: 'busy' });
+    b.done('neutral');
+    // global bucket: 10 wrong tries, then ~1 s waits for everyone; refills over time
+    const l2 = createLoginLimiter({ now: () => clock });
+    for (let i = 0; i < 10; i++) l2.begin(`ip${i}`).done('fail');
+    expect(l2.begin('someone-else')).toMatchObject({ ok: false, reason: 'slow', retryAfterSec: 1 });
+    clock += 1000;
+    expect(l2.begin('someone-else').ok).toBe(true);
   });
 
   it('npm run set-pin -- --pin / --check (script)', () => {

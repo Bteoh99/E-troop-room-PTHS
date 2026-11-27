@@ -5,5 +5,5 @@ Assert-Admin $PSCommandPath
 Write-Step 'Stopping the e-Troop Store Room app'
 Stop-StoreRoom
 Write-Ok 'Stopped. It starts again automatically when the laptop restarts.'
-Write-Host '    To start it now without restarting: run install.bat again (it is safe).'
+Write-Host '    To start it again now: double-click start-app.bat.'
 Wait-ForEnter
