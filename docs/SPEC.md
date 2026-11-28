@@ -245,3 +245,73 @@ Laptop must be 64-bit Windows 10 with Node.js 22 LTS (x64) and Git installed. Po
   - The others get `barcode = NULL`, and their notes get "Barcode <value> removed: duplicate of <CODE> (leading zeros)".
   - A warning with the count is logged at start-up.
 - **Windows:** `settings.ps1` recreates the firewall rule itself (same Private + LocalSubnet rule) when the port changes.
+
+---
+
+# Phase 1.6 — The troop's real inventory format (QM_List_2026-2027.xlsx)
+
+The quartermaster's real Excel arrived. Its structure differs from what Phase 1 assumed. **This section overrides earlier sections where they conflict.** A local copy for manual verification is at
+`/tmp/claude-0/-home-user/ecc10d9d-dca6-59f2-a4be-2f9b335ed6c6/scratchpad/xl-in/qm.xlsx` — use it for dry-run checks only; **never commit it or copy its rows into the repo** (tests must use generated workbooks with the same *structure*).
+
+## The real file
+Sheet **"Overall List"**: header row `CODE | ITEM DESCRIPTION | QUANTITY | GOOD CONDITION | BAD CONDITION` (data from column B; column A empty; trailing spaces in headers, e.g. `"CODE "`). Section rows like `RACK AU` / `RACK AX` (grey fill, only column B filled). 79 code rows: 57 with an item, 22 with a code but no description (= empty compartments). Codes repeat when several items share a compartment (e.g. `AU0305` → Parang, Saw, Trolley spare part, Raincoat). One code is lowercase (`ax0304`).
+QUANTITY is a number or text: `a box`, `1 box`, `2 box`, `2 box(24)`, `3 small box`, `2 pack`. GOOD/BAD CONDITION are counts (sometimes the same text as quantity, e.g. `a box`; one cell `3 small bax`). Some rows have inconsistent numbers (e.g. qty 2, good blank, bad 4).
+Sheet **"Patrol Box"**: header `Patrol Box | Item Description | Quantity | Condition` listing what goes in ONE patrol box (2 Parang, 2 Saw, 1 Pot, 1 frying pan, 2 gas stove).
+
+## Decisions (from the quartermaster)
+1. **The CODE is a location**, not an item code: `AU0305` = **Rack AU, Level 03, Compartment 05**. **Level 01 is the bottom** of the rack. Compartment numbers are as written (they are NOT unique per rack — e.g. AU0306 and AU0406 both say compartment 06 — so the full code is the key of a compartment).
+2. **No item ID/code in the UI.** Items are identified by name + location. The DB keeps its numeric id; `code` becomes optional/nullable (unique only when present) and is hidden from the UI (keep it in the API for later phases).
+3. **Condition = good / bad counts** per item, like the Excel.
+4. **Fix obvious spelling mistakes on import and show the list** of corrections in the import preview before anything is saved.
+
+## A. Location scheme v2 (backend + frontend parser parity)
+- New canonical form **`AU0305`**: 1–3 letters rack id, 2-digit level, 2-digit compartment. Accept loose input: `au0305`, `AU 03 05`, `AU-03-05`, `AU-3-5`, `AU/03/05`, `Rack AU level 3 compartment 5` → `AU0305`. Rack only `AU`, rack+level `AU03` (two digits) are allowed partial locations.
+- Item/location fields: `rack: "AU"`, `level: 3` (int), `compartment: 5` (int), `locationCode: "AU0305"`. For display: "Rack AU · Level 3 · Compartment 05".
+- **Legacy** `R03-B-2` style must keep working (old data, old tests): parser tries v2 first, then legacy. Legacy maps to rack/shelf/bin as before. Pick ONE internal representation that serves both (e.g. keep `rack`, add `level`/`compartment`, keep `shelf`/`bin` for legacy) — document it. Ambiguity rule: a string of letters+4 digits is v2.
+- Unparseable text is still kept as-is with rack null (never reject).
+
+## B. Compartments (rack layout) — new table
+- `compartments(code PRIMARY KEY, rack, level, compartment, created_at)`. Filled from: every location code seen in an import (incl. rows with a code but no item), and every saved item location. Leaders can delete an empty compartment (PIN).
+- `GET /api/racks` → `{ racks: [{ rack, levels: number, compartments: number, emptyCompartments: number, itemCount }], unlocated }` sorted by rack id.
+- `GET /api/racks/:rack` → `{ rack, levels: [{ level, compartments: [{ code, compartment, items: Item[] }] }] }` with levels sorted **descending** (top of rack first, so the UI can draw level 01 at the bottom) and compartments ascending; empty compartments included with `items: []`. Legacy racks keep their shelf structure (shape documented in SPEC notes).
+
+## C. Item fields v4
+- `quantity`: integer ≥ 0 **or null** (= not counted). `unit` (default `pcs`).
+- `goodQty`, `badQty`: integer ≥ 0 or null.
+- Derived (read-only) `status`: `"attention"` if badQty > 0; `"ok"` if goodQty > 0 and badQty is 0/null; `"unchecked"` otherwise. `countsMismatch: true` when quantity, goodQty and badQty are all numbers and good + bad ≠ quantity (warning only, never rejected).
+- The old `condition` field is retired from the UI. Migration: existing rows: good → goodQty = quantity, badQty 0; needs_repair/damaged → badQty = quantity, goodQty 0; written_off → badQty = quantity + note "Written off". Keep the column or drop it — developer's call, document it; API may still accept `condition` on write for backward compatibility (mapped as above) or reject with 400 — document.
+- `contents`: optional list `[{ name, quantity }]` (kit contents, see E). Stored per item.
+- Search filter `status=attention|ok|unchecked` replaces `condition` (keep `condition` param working or 400 — document).
+- `code`: optional, hidden in UI.
+
+## D. Import of the real format
+- Detect the header row anywhere in the first 20 rows (already done) with these aliases added: `item description` → name; `good condition`/`good`/`baik` → goodQty; `bad condition`/`bad`/`rosak` → badQty. Header text is trimmed (`"CODE "`).
+- **CODE column as location**: when the file has no separate location column and the CODE values mostly (≥ 80% of non-empty) parse as v2 locations → treat CODE as the location for every row. (Otherwise CODE stays an item code as before.)
+- Rows whose only filled cell is like `RACK AU` → section header; not an error (count them as `sections`).
+- Row with a location but no name → **empty compartment**: create the compartment, no item; count `emptyCompartments`.
+- **Quantity text**: `a box`/`an box`/`one box` → 1 box; `<n> <unit words>` → n + unit (`3 small box` → 3, `small box`; `2 pack` → 2, `pack`); a trailing bracket like `2 box(24)` → 2, `box`, and append `Excel quantity: 2 box(24)` to notes. Same parsing for good/bad cells (number part only). Unparseable → quantity null + warning, raw text kept in notes.
+- **Upsert key = location + folded name** (no codes). Re-importing the same file changes nothing (`unchanged`). The same location+name twice in one file → first row kept, `Warning: duplicate row (AY0204 gas) ignored — check the Excel`.
+- **Tidy + spelling**: trim and collapse spaces; capitalise the first letter of names (`axe` → `Axe`); uppercase location codes. A built-in, easily extended corrections list (in its own module) fixes known typos as whole words/phrases, case-insensitively: `repenllent`→`repellent`, `fox nad spoon`→`fork and spoon`, `bid ladle`→`big ladle`, `safety vase`→`safety vest`, `bax`→`box`. Each change is reported in a new response array `corrections: [{ row, field, from, to }]` (dry run and real). Tidy-only changes (spaces/capitalisation) are NOT listed.
+- Warnings (row still imported): counts don't add up; quantity missing; unparseable counts; duplicate row.
+- **Extra sheets as kit contents**: another sheet whose title matches an item name (case-insensitive, e.g. "Patrol Box") and has name + quantity columns becomes the `contents` of every item with that name. Report `kits: [{ name, items: n, appliedTo: n }]`.
+- Response adds: `sections`, `emptyCompartments`, `corrections`, `kits`. Preview rows show location, name, quantity+unit, good, bad.
+- Template download updated to the new columns (Location, Item description, Quantity, Unit, Good, Bad, Brand, Model, Barcode, Notes) with example rows in the new location format.
+
+## E. Search & scan
+- `q` matches name, location code (`AU0305`, `au 03 05`, `AU03` = whole level, `AU` = whole rack), category, notes, brand, model, barcode. Ranking: exact location / exact barcode first, then name prefix, then others.
+- `/api/scan/match`: a photographed **compartment label** (OCR text containing `AU0305` / `AU 0305`) returns the items in that compartment (score 1, `matchedOn: ["location"]`). Item-code matching remains for items that still have a code.
+
+## F. Seed data
+Replace the demo seed with ~30 realistic items in the **new format** across 4 racks named like `BA`, `BB`, `BC`, `BD` (do not copy the troop's real list), 3–4 levels each, some shared compartments, some empty compartments, a few items with bad counts, one kit ("Patrol Box") with contents.
+
+## G. Frontend
+- Location badge: `📍 AU0305` (big), sub-line "Rack AU · Level 3 · Compartment 05".
+- **Rack diagram v2**: levels drawn with the highest level at the top and **Level 01 at the bottom**; each level shows its compartments (incl. empty, from the layout API) left→right; the item's compartment highlighted; other items in the same compartment listed under the diagram ("Also in AU0305: Saw, Raincoat…").
+- Rack page: levels top→bottom (01 last), each compartment card lists its items or "Empty".
+- Map: rack tiles (AU, AX, AY, AZ…) with item count and empty-compartment count.
+- No item code anywhere in the UI (cards, detail, form, import preview); items are titled by name.
+- Condition: chips "✔ 4 good", "⚠ 2 bad", "Not checked"; a "Needs attention" filter/list (status=attention) reachable from Search and Map; counts-mismatch hint on detail and form.
+- Form: Quantity (optional), Unit, Good, Bad (optional), with the mismatch hint; location field with the v2 live preview.
+- Detail: kit contents table when present ("Each Patrol Box should contain: …").
+- Import preview: corrections table ("Row 51: mosquito repenllent → mosquito repellent"), warnings, empty compartments and section counts, kits found.
+- "Needs a location" page keeps working with the v2 format (rack prefix helper e.g. `AU` then type `0305`).
