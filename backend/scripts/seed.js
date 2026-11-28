@@ -1,55 +1,73 @@
 /**
- * Seed ~25 realistic scout store items across racks R01–R06, shelves A–D.
- * Only runs when the items table is empty. Uses DB_PATH (default data/store.db).
+ * Seed ~30 demo items in the Phase 1.6 format: racks BA, BB, BC, BD; 3-4 levels each (level 01 is the
+ * bottom); some shared compartments, some empty compartments, a few bad counts, and one kit
+ * ("Patrol Box") with contents. Only runs when the items table is empty. Uses DB_PATH (default data/store.db).
+ * (Demo data only - not the troop's real list.)
  */
 import '../src/loadEnv.js';
 import { pathToFileURL } from 'node:url';
 import { openDb, resolveDbPath } from '../src/db/index.js';
-import { countItems, createItem } from '../src/services/items.js';
+import { countItems, createItem, registerCompartment } from '../src/services/items.js';
 
-export const SEED_ITEMS = [
-  // R01 — Tents
-  { code: 'TNT-001', name: '2-man hike tent', category: 'Tents', locationCode: 'R01-A-1', quantity: 4, condition: 'good', notes: 'Lightweight, for hikes and expeditions' },
-  { code: 'TNT-004', name: '4-man dome tent', category: 'Tents', locationCode: 'R01-B-2', quantity: 6, condition: 'good', notes: 'Green, with rain fly', brand: 'Coleman', model: 'Sundome 4' },
-  { code: 'TNT-006', name: '6-man patrol tent', category: 'Tents', locationCode: 'R01-C-1', quantity: 3, condition: 'needs_repair', notes: 'One has a broken zip on the door' },
-  { code: 'TNT-010', name: 'Dining shelter / flysheet 4x6 m', category: 'Tents', locationCode: 'R01-D-1', quantity: 2, condition: 'good', notes: 'Poles stored with it' },
-  { code: 'TNT-020', name: 'Tent peg set (steel, 20 pcs)', category: 'Tents', locationCode: 'R01-D-3', quantity: 10, unit: 'sets', condition: 'good', notes: '' },
-  // R02 — Cooking
-  { code: 'CKG-001', name: 'Kuali (wok) 40 cm', category: 'Cooking', locationCode: 'R02-A-1', quantity: 3, condition: 'good', notes: '' },
-  { code: 'CKG-002', name: 'Periuk (cooking pot) 10 L', category: 'Cooking', locationCode: 'R02-A-2', quantity: 4, condition: 'good', notes: 'Aluminium, with lids' },
-  { code: 'CKG-005', name: 'Portable gas stove (single burner)', category: 'Cooking', locationCode: 'R02-B-1', quantity: 5, condition: 'good', notes: 'Gas canisters NOT stored here — see safety cabinet', brand: 'Campingaz', model: 'Camp Bistro' },
-  { code: 'CKG-008', name: 'Mess tin set', category: 'Cooking', locationCode: 'R02-C-1', quantity: 24, unit: 'sets', condition: 'good', notes: '' },
-  { code: 'CKG-012', name: 'Water jerry can 20 L', category: 'Cooking', locationCode: 'R02-D-1', quantity: 6, condition: 'damaged', notes: 'Two leak at the tap' },
-  // R03 — Ropes & pioneering
-  { code: 'ROP-010', name: 'Manila rope 10 m', category: 'Ropes', locationCode: 'R03-A-1', quantity: 12, unit: 'coils', condition: 'good', notes: '' },
-  { code: 'ROP-030', name: 'Nylon rope 30 m', category: 'Ropes', locationCode: 'R03-A-2', quantity: 6, unit: 'coils', condition: 'needs_repair', notes: 'Ends need whipping' },
-  { code: 'ROP-050', name: 'Lashing cord 5 mm (bundle)', category: 'Ropes', locationCode: 'R03-B-1', quantity: 20, unit: 'bundles', condition: 'good', notes: 'For pioneering projects' },
-  { code: 'PNR-001', name: 'Pioneering spar 3 m (bamboo)', category: 'Pioneering', locationCode: 'R03-D-1', quantity: 30, condition: 'good', notes: 'Bottom shelf, long items' },
-  // R04 — Tools
-  { code: 'TLS-001', name: 'Parang with sheath', category: 'Tools', locationCode: 'R04-A-1', quantity: 4, condition: 'good', notes: 'Adult supervision only' },
-  { code: 'TLS-003', name: 'Folding saw', category: 'Tools', locationCode: 'R04-A-2', quantity: 5, condition: 'good', notes: '', brand: 'Silky', model: 'Pocketboy 170' },
-  { code: 'TLS-005', name: 'Camp axe', category: 'Tools', locationCode: 'R04-B-1', quantity: 2, condition: 'needs_repair', notes: 'Handle loose on one' },
-  { code: 'TLS-010', name: 'Mallet (rubber)', category: 'Tools', locationCode: 'R04-B-3', quantity: 6, condition: 'good', notes: '' },
-  { code: 'TLS-015', name: 'Spade / cangkul', category: 'Tools', locationCode: 'R04-D-1', quantity: 3, condition: 'written_off', notes: 'Rusted through — to be replaced' },
-  // R05 — First aid & lighting
-  { code: 'FAK-001', name: 'First aid kit (patrol)', category: 'First Aid', locationCode: 'R05-A-1', quantity: 6, unit: 'kits', condition: 'good', notes: 'Check expiry dates every term' },
-  { code: 'FAK-010', name: 'Triangular bandage', category: 'First Aid', locationCode: 'R05-A-3', quantity: 40, condition: 'good', notes: '' },
-  { code: 'FAK-020', name: 'Stretcher (folding)', category: 'First Aid', locationCode: 'R05-C-1', quantity: 1, condition: 'good', notes: '' },
-  { code: 'LGT-001', name: 'Gas lantern', category: 'Lighting', locationCode: 'R05-B-1', quantity: 4, condition: 'good', notes: '' },
-  { code: 'LGT-005', name: 'Head torch (LED)', category: 'Lighting', locationCode: 'R05-B-2', quantity: 15, condition: 'good', notes: 'AAA batteries in the drawer', brand: 'Petzl', model: 'Tikkina', barcode: '3342540827257' },
-  // R06 — Flags & ceremonial
-  { code: 'FLG-001', name: 'Jalur Gemilang flag (large)', category: 'Flags', locationCode: 'R06-A-1', quantity: 2, condition: 'good', notes: 'Fold properly after use' },
-  { code: 'FLG-002', name: 'Troop flag', category: 'Flags', locationCode: 'R06-A-2', quantity: 1, condition: 'good', notes: '' },
-  { code: 'FLG-010', name: 'Patrol pennant set', category: 'Flags', locationCode: 'R06-B-1', quantity: 8, unit: 'sets', condition: 'needs_repair', notes: 'Eagle pennant torn' },
-  { code: 'FLG-020', name: 'Flagpole 6 m (sectional)', category: 'Flags', locationCode: 'R06-D-1', quantity: 2, condition: 'good', notes: '' },
+const PATROL_BOX = [
+  { name: 'Parang', quantity: 1 },
+  { name: 'Folding saw', quantity: 1 },
+  { name: 'Pot', quantity: 2 },
+  { name: 'Frying pan', quantity: 1 },
+  { name: 'Gas stove', quantity: 1 },
+  { name: 'First aid pouch', quantity: 1 },
 ];
 
-export function seed(db) {
+const item = (locationCode, name, quantity, goodQty, badQty, extra = {}) => ({ locationCode, name, quantity, goodQty, badQty, ...extra });
+
+export const SEED_ITEMS = [
+  // Rack BA - tents and shelters (4 levels)
+  item('BA0101', 'Dome tent (4 person)', 6, 5, 1, { brand: 'Coleman', model: 'Sundome 4', notes: 'One has a broken zip' }),
+  item('BA0102', 'Patrol tent (6 person)', 3, 3, 0),
+  item('BA0201', 'Fly sheet', 10, 10, 0),
+  item('BA0201', 'Ground sheet', 8, 7, 1),
+  item('BA0202', 'Tent pegs', 4, 4, 0, { unit: 'box' }),
+  item('BA0301', 'Tent spare parts', 1, 1, 0, { unit: 'box' }),
+  item('BA0401', 'Dining shelter', 1, 1, 0),
+  // Rack BB - cooking (3 levels)
+  item('BB0101', 'Water jerry can', 6, 4, 2, { notes: 'Two leak at the tap' }),
+  item('BB0102', 'Patrol Box', 1, 1, 0, { contents: PATROL_BOX }),
+  item('BB0103', 'Patrol Box', 1, 1, 0, { contents: PATROL_BOX }),
+  item('BB0201', 'Gas stove', 4, 4, 0, { brand: 'Campingaz', model: 'Camp Bistro' }),
+  item('BB0201', 'Kerosene lamp', 3, 3, 0),
+  item('BB0202', 'Big kettle', 2, 2, 0),
+  item('BB0202', 'Ladle', 3, 3, 0),
+  item('BB0202', 'Frying pan', 2, 1, 1),
+  item('BB0203', 'Pot', 5, 5, 0),
+  item('BB0301', 'Paper cups', 1, null, null, { unit: 'box', notes: 'Not counted yet' }),
+  // Rack BC - tools and pioneering (4 levels)
+  item('BC0101', 'Bamboo spar 3 m', 30, 28, 2),
+  item('BC0102', 'Mallet', 6, 6, 0),
+  item('BC0201', 'Parang', 8, 8, 0),
+  item('BC0201', 'Folding saw', 6, 5, 1, { brand: 'Silky', model: 'Pocketboy 170' }),
+  item('BC0201', 'Axe', 2, 2, 0),
+  item('BC0302', 'Manila rope 10 m', 12, 12, 0, { unit: 'coils' }),
+  item('BC0302', 'Lashing cord', 20, 20, 0, { unit: 'bundles' }),
+  item('BC0401', 'Safety vest', 15, 15, 0),
+  // Rack BD - first aid, lighting, flags (3 levels)
+  item('BD0101', 'First aid kit', 6, 6, 0, { unit: 'kits', notes: 'Check expiry dates every term' }),
+  item('BD0102', 'Stretcher', 1, 1, 0),
+  item('BD0201', 'Head torch', 15, 13, 2, { brand: 'Petzl', model: 'Tikkina', barcode: '3342540827257' }),
+  item('BD0202', 'Gas lantern', 4, 4, 0),
+  item('BD0301', 'Patrol flags', 8, 7, 1, { unit: 'sets' }),
+  item('BD0301', 'Flag pole (sectional)', 2, 2, 0),
+];
+
+/** Compartments that exist on the racks but are empty right now. */
+export const SEED_EMPTY_COMPARTMENTS = ['BA0302', 'BA0402', 'BB0302', 'BB0303', 'BC0301', 'BC0402', 'BD0203', 'BD0302'];
+
+export function seed(db, items = SEED_ITEMS, emptyCompartments = items === SEED_ITEMS ? SEED_EMPTY_COMPARTMENTS : []) {
   if (countItems(db) > 0) return { inserted: 0, skipped: true };
   db.transaction(() => {
-    for (const item of SEED_ITEMS) createItem(db, item);
+    for (const it of items) createItem(db, it);
+    for (const code of emptyCompartments) registerCompartment(db, code);
   })();
-  return { inserted: SEED_ITEMS.length, skipped: false };
+  return { inserted: items.length, skipped: false };
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

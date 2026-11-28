@@ -45,7 +45,9 @@ describe('POST /api/items', () => {
     expectItemShape(expect, res.body);
     expect(res.body).toMatchObject({
       code: 'TNT-004', name: '4-man dome tent', category: null, locationCode: null,
-      rack: null, shelf: null, bin: null, quantity: 1, unit: 'pcs', condition: 'good', notes: '',
+      rack: null, shelf: null, bin: null, quantity: 1, unit: 'pcs', notes: '',
+      // Phase 1.6: condition -> counts; nothing counted yet
+      goodQty: null, badQty: null, status: 'unchecked', countsMismatch: false, level: null, compartment: null, contents: [],
     });
     expect(res.body.createdAt).toBe(res.body.updatedAt);
   });
@@ -58,15 +60,24 @@ describe('POST /api/items', () => {
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({
       code: 'TNT-004', name: '4-man dome tent', category: 'Tents', locationCode: 'R03-B-2',
-      rack: 'R03', shelf: 'B', bin: 2, quantity: 6, unit: 'tents', condition: 'needs_repair', notes: 'Broken zip',
+      rack: 'R03', shelf: 'B', bin: 2, quantity: 6, unit: 'tents', notes: 'Broken zip',
+      goodQty: 0, badQty: 6, status: 'attention', // Phase 1.6: condition needs_repair -> bad = quantity
     });
   });
 
-  it('accepts all four conditions', async () => {
-    for (const [i, condition] of ['good', 'needs_repair', 'damaged', 'written_off'].entries()) {
-      const res = await request(app).post('/api/items').send({ code: `C-${i}`, name: 'x', condition });
+  // Phase 1.6: `condition` is still accepted on write, but becomes good/bad counts and is not returned.
+  it('accepts all four conditions (mapped to good/bad counts)', async () => {
+    const expected = {
+      good: { goodQty: 3, badQty: 0, status: 'ok', notes: '' },
+      needs_repair: { goodQty: 0, badQty: 3, status: 'attention', notes: '' },
+      damaged: { goodQty: 0, badQty: 3, status: 'attention', notes: '' },
+      written_off: { goodQty: 0, badQty: 3, status: 'attention', notes: 'Written off' },
+    };
+    for (const [i, condition] of Object.keys(expected).entries()) {
+      const res = await request(app).post('/api/items').send({ code: `C-${i}`, name: 'x', condition, quantity: 3 });
       expect(res.status).toBe(201);
-      expect(res.body.condition).toBe(condition);
+      expect(res.body).toMatchObject(expected[condition]);
+      expect(res.body).not.toHaveProperty('condition');
     }
   });
 
@@ -112,8 +123,7 @@ describe('POST /api/items', () => {
   });
 
   it.each([
-    ['missing code', { name: 'x' }, 'code'],
-    ['blank code', { code: '   ', name: 'x' }, 'code'],
+    // Phase 1.6: code is optional ("missing code" / "blank code" now create an item; see below)
     ['missing name', { code: 'A' }, 'name'],
     ['blank name', { code: 'A', name: '' }, 'name'],
     ['negative quantity', { code: 'A', name: 'x', quantity: -1 }, 'quantity'],
@@ -129,6 +139,14 @@ describe('POST /api/items', () => {
     expectErrorShape(expect, res.body);
     expect(Array.isArray(res.body.error.details)).toBe(true);
     expect(res.body.error.details.map((d) => d.path)).toContain(field);
+  });
+
+  it('code is optional (Phase 1.6): missing or blank code -> 201 with code null', async () => {
+    for (const body of [{ name: 'x' }, { code: '   ', name: 'y' }]) {
+      const res = await request(app).post('/api/items').send(body);
+      expect(res.status).toBe(201);
+      expect(res.body.code).toBeNull();
+    }
   });
 
   it('empty body -> 400', async () => {
@@ -189,7 +207,8 @@ describe('PUT /api/items/:id', () => {
     const res = await request(app).put(`/api/items/${item.id}`).send({ quantity: 4 });
     expect(res.status).toBe(200);
     expectItemShape(expect, res.body);
-    expect(res.body).toEqual({ ...item, quantity: 4, updatedAt: res.body.updatedAt });
+    // Phase 1.6: good (6) + bad (0) no longer equals the quantity (4) -> derived countsMismatch
+    expect(res.body).toEqual({ ...item, quantity: 4, countsMismatch: true, updatedAt: res.body.updatedAt });
     expect(res.body.updatedAt >= item.updatedAt).toBe(true);
     expect(res.body.createdAt).toBe(item.createdAt);
   });
@@ -238,7 +257,8 @@ describe('PUT /api/items/:id', () => {
   });
 
   it.each([
-    [{ name: '' }], [{ code: '' }], [{ quantity: -5 }], [{ condition: 'broken' }], [{ quantity: null }], [{ name: null }],
+    // Phase 1.6: { code: '' } clears the optional code and { quantity: null } means "not counted" (both valid now)
+    [{ name: '' }], [{ quantity: -5 }], [{ condition: 'broken' }], [{ name: null }], [{ goodQty: -1 }], [{ contents: 'x' }],
   ])('invalid patch %j -> 400 and item unchanged', async (patch) => {
     const res = await request(app).put(`/api/items/${item.id}`).send(patch);
     expect(res.status).toBe(400);

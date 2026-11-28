@@ -7,6 +7,7 @@ import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db/index.js';
 import { seed } from '../scripts/seed.js';
+import { LEGACY_SEED_ITEMS } from './fixtures/legacy-seed.js';
 import { readConfig, setPin } from '../src/auth/config.js';
 import { signToken } from '../src/auth/tokens.js';
 
@@ -39,7 +40,10 @@ let sharedLeader = null;
  */
 export function makeApp({ seeded = false, leader = sharedLeader ??= makeLeaderConfig(), ...opts } = {}) {
   const db = openDb(':memory:');
-  if (seeded) seed(db);
+  // seeded: true = the Phase 1 demo list (legacy locations, codes) the older tests were written for;
+  // seeded: 'demo' = the app's own Phase 1.6 seed.
+  if (seeded === 'demo') seed(db);
+  else if (seeded) seed(db, LEGACY_SEED_ITEMS);
   const publicApp = createApp(db, { configPath: leader.configPath, staticDir: false, ...opts });
   const app = (req, res) => {
     if (!('authorization' in req.headers)) req.headers.authorization = `Bearer ${leader.token}`;
@@ -48,18 +52,22 @@ export function makeApp({ seeded = false, leader = sharedLeader ??= makeLeaderCo
   return { app, publicApp, db, ...leader };
 }
 
+// Phase 1.6: level/compartment (v2 locations), goodQty/badQty + derived status/countsMismatch, contents;
+// `condition` is no longer returned.
 export const ITEM_KEYS = [
-  'id', 'code', 'name', 'category', 'locationCode', 'rack', 'shelf', 'bin',
-  'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode', 'createdAt', 'updatedAt',
+  'id', 'code', 'name', 'category', 'locationCode', 'rack', 'level', 'compartment', 'shelf', 'bin',
+  'quantity', 'unit', 'goodQty', 'badQty', 'status', 'countsMismatch', 'notes', 'brand', 'model', 'barcode', 'contents',
+  'createdAt', 'updatedAt',
 ].sort();
 
 export const PREVIEW_KEYS = [
-  'row', 'action', 'id', 'code', 'name', 'category', 'locationCode', 'rack', 'shelf', 'bin',
-  'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode',
+  'row', 'action', 'id', 'code', 'name', 'category', 'locationCode', 'rack', 'level', 'compartment', 'shelf', 'bin',
+  'quantity', 'unit', 'goodQty', 'badQty', 'status', 'countsMismatch', 'notes', 'brand', 'model', 'barcode', 'contents',
 ].sort();
 
 export const IMPORT_KEYS = [
   'dryRun', 'created', 'updated', 'unchanged', 'skipped', 'errors', 'preview', 'headerRow', 'columns', 'ignoredColumns',
+  'sections', 'emptyCompartments', 'corrections', 'kits',
 ].sort();
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -68,16 +76,21 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 export function expectItemShape(expect, item) {
   expect(Object.keys(item).sort()).toEqual(ITEM_KEYS);
   expect(typeof item.id).toBe('number');
-  expect(typeof item.code).toBe('string');
+  expect(item.code === null || typeof item.code === 'string').toBe(true);
   expect(typeof item.name).toBe('string');
   expect(item.category === null || typeof item.category === 'string').toBe(true);
   expect(item.locationCode === null || typeof item.locationCode === 'string').toBe(true);
-  expect(item.rack === null || /^R\d{2,3}$/.test(item.rack)).toBe(true);
+  expect(item.rack === null || /^(R\d{2,3}|[A-Z]{1,3})$/.test(item.rack)).toBe(true);
+  expect(item.level === null || Number.isInteger(item.level)).toBe(true);
+  expect(item.compartment === null || Number.isInteger(item.compartment)).toBe(true);
   expect(item.shelf === null || /^[A-Z]$/.test(item.shelf)).toBe(true);
   expect(item.bin === null || Number.isInteger(item.bin)).toBe(true);
-  expect(Number.isInteger(item.quantity) && item.quantity >= 0).toBe(true);
+  expect(item.quantity === null || (Number.isInteger(item.quantity) && item.quantity >= 0)).toBe(true);
   expect(typeof item.unit).toBe('string');
-  expect(['good', 'needs_repair', 'damaged', 'written_off']).toContain(item.condition);
+  for (const k of ['goodQty', 'badQty']) expect(item[k] === null || (Number.isInteger(item[k]) && item[k] >= 0)).toBe(true);
+  expect(['attention', 'ok', 'unchecked']).toContain(item.status);
+  expect(typeof item.countsMismatch).toBe('boolean');
+  expect(Array.isArray(item.contents)).toBe(true);
   expect(typeof item.notes).toBe('string');
   expect(item.createdAt).toMatch(ISO_RE);
   expect(item.updatedAt).toMatch(ISO_RE);

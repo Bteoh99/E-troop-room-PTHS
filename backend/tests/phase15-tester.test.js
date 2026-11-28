@@ -584,7 +584,12 @@ describe('A. migration v1 -> v2 keeps data', () => {
 
     const db = openDb(file);
     const after = db.prepare('SELECT * FROM items ORDER BY id').all();
-    expect(after).toEqual(before.map((r) => ({ ...r, brand: null, model: null, barcode: null })));
+    // Phase 1.6 (migration v4): + level/compartment, good/bad counts from the old condition
+    // (good -> good = quantity; otherwise bad = quantity), contents; `condition` column kept for history
+    const counts = { 'TNT-004': { good_qty: 0, bad_qty: 6 }, 'ROP-010': { good_qty: 0, bad_qty: 0 } };
+    expect(after).toEqual(before.map((r) => ({
+      ...r, brand: null, model: null, barcode: null, level: null, compartment: null, contents: null, ...counts[r.code],
+    })));
     // fix round: migration v3 (barcode unique ignoring leading zeros) was added after v2
     expect(db.prepare('SELECT version FROM schema_version ORDER BY version').all()).toEqual(migrations.map((m) => ({ version: m.version })));
     expect(db.prepare("SELECT applied_at FROM schema_version WHERE version = 1").get().applied_at).toBe('2026-01-01T00:00:00.000Z');
@@ -596,7 +601,7 @@ describe('A. migration v1 -> v2 keeps data', () => {
     expect(list.body.items.map((i) => i.code)).toEqual(['ROP-010', 'TNT-004']);
     list.body.items.forEach((i) => expectItemShape(expect, i));
     const put = await request(upgraded).put('/api/items/1').set(auth).send({ barcode: '123', brand: 'Coleman' });
-    expect(put.body).toMatchObject({ code: 'TNT-004', condition: 'damaged', barcode: '123', brand: 'Coleman', createdAt: '2026-01-01T00:00:00.000Z' });
+    expect(put.body).toMatchObject({ code: 'TNT-004', goodQty: 0, badQty: 6, status: 'attention', barcode: '123', brand: 'Coleman', createdAt: '2026-01-01T00:00:00.000Z' });
     expect((await request(upgraded).post('/api/items').set(auth).send({ code: 'X', name: 'x', barcode: '123' })).status).toBe(409);
     db.close();
 

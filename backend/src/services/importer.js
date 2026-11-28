@@ -1,16 +1,21 @@
 /**
- * Excel / CSV import: read the file, map rows (lib/importRows.js), then upsert by code.
- * Dry run computes exactly the same result but writes nothing; a real import runs in one transaction.
+ * Excel / CSV import: read the workbook, map rows (lib/importRows.js), then upsert.
+ * Upsert key: the item code when a row has one; otherwise location + folded name (the troop's real
+ * file has no item codes). Dry run computes exactly the same result but writes nothing; a real import
+ * runs in one transaction. Extra sheets named like an item (e.g. "Patrol Box") become kit contents.
  */
 import ExcelJS from 'exceljs';
 import { ZodError } from 'zod';
 import { parseCsv, decodeText } from '../lib/csv.js';
-import { buildImportPlan } from '../lib/importRows.js';
+import { buildImportPlan, buildKitContents, foldName } from '../lib/importRows.js';
 import { findHeaderRow } from '../lib/headers.js';
 import { badRequest, HttpError } from '../lib/errors.js';
 import { checkXlsx } from '../lib/xlsxGuard.js';
 import { updateItemSchema } from '../lib/itemSchema.js';
-import { buildNewItem, clearBarcode, createItem, getItemByBarcode, getItemByCode, mergeItem, updateItem } from './items.js';
+import {
+  buildNewItem, clearBarcode, createItem, findByLocationAndName, getItemByBarcode, getItemByCode, mergeItem,
+  registerCompartment, updateItem,
+} from './items.js';
 import { barcodeKey } from '../lib/scanMatch.js';
 
 export const MAX_IMPORT_ROWS = 20_000; // data rows (after the header)
@@ -39,18 +44,22 @@ function sheetRows(ws) {
 const tooManyRows = () =>
   badRequest(`Too many rows; the maximum is ${MAX_IMPORT_ROWS} per import. Split the file into smaller files.`);
 
-/** Read rows from an .xlsx or .csv buffer. Picks the first (visible) sheet that has a usable header row. */
-export async function readSpreadsheet(buffer, ext) {
+/**
+ * Read an .xlsx or .csv buffer.
+ * @returns {Promise<{ main: { name: string, rows: object[] } | null, others: { name: string, rows: object[] }[] }>}
+ * main = the first visible sheet whose header has a name column plus a code or location column
+ * (else the first with a name column, else the first non-empty sheet); others = the other sheets.
+ */
+export async function readWorkbook(buffer, ext) {
   if (ext === '.csv') {
     try {
       // +200 leaves room for title/blank rows above the header; the exact check is in importItems.
       // No cell cap for CSV: plain strings are cheap, and the 5 MB upload limit bounds them.
-      return parseCsv(decodeText(buffer), undefined, { maxRows: MAX_IMPORT_ROWS + 200 })
+      const rows = parseCsv(decodeText(buffer), undefined, { maxRows: MAX_IMPORT_ROWS + 200 })
         .map((cells, i) => ({ rowNumber: i + 1, cells }));
+      return { main: rows.length ? { name: 'CSV', rows } : null, others: [] };
     } catch (err) {
-      if (err instanceof RangeError) {
-        throw tooManyRows();
-      }
+      if (err instanceof RangeError) throw tooManyRows();
       throw err;
     }
   }
@@ -64,17 +73,23 @@ export async function readSpreadsheet(buffer, ext) {
   } catch {
     throw badRequest('Could not read the Excel file. Make sure it is a valid .xlsx workbook.');
   }
-  const sheets = wb.worksheets.filter((ws) => ws.state !== 'hidden' && ws.state !== 'veryHidden');
-  const candidates = sheets.length ? sheets : wb.worksheets;
-  let fallback = null;
-  for (const ws of candidates) {
-    const rows = sheetRows(ws);
-    if (rows.length === 0) continue;
-    fallback ??= rows;
-    const header = findHeaderRow(rows.map((r) => r.cells));
-    if (header && 'code' in header.mapping && 'name' in header.mapping) return rows;
-  }
-  return fallback ?? [];
+  const visible = wb.worksheets.filter((ws) => ws.state !== 'hidden' && ws.state !== 'veryHidden');
+  const candidates = (visible.length ? visible : wb.worksheets)
+    .map((ws) => ({ name: ws.name, rows: sheetRows(ws) }))
+    .filter((sh) => sh.rows.length > 0);
+  const scored = candidates.map((sh) => {
+    const h = findHeaderRow(sh.rows.map((r) => r.cells));
+    const m = h?.mapping ?? {};
+    return { sh, score: 'name' in m ? ('code' in m || 'location' in m ? 2 : 1) : 0 };
+  });
+  const best = scored.find((x) => x.score === 2) ?? scored.find((x) => x.score === 1) ?? scored[0];
+  const main = best?.sh ?? null;
+  return { main, others: candidates.filter((sh) => sh !== main) };
+}
+
+/** Rows of the main sheet (kept for callers/tests of the Phase 1 API). */
+export async function readSpreadsheet(buffer, ext) {
+  return (await readWorkbook(buffer, ext)).main?.rows ?? [];
 }
 
 function previewItem(item, row, action) {
@@ -87,30 +102,43 @@ function previewItem(item, row, action) {
     category: item.category,
     locationCode: item.locationCode,
     rack: item.rack,
+    level: item.level,
+    compartment: item.compartment,
     shelf: item.shelf,
     bin: item.bin,
     quantity: item.quantity,
     unit: item.unit,
-    condition: item.condition,
+    goodQty: item.goodQty,
+    badQty: item.badQty,
+    status: item.status,
+    countsMismatch: item.countsMismatch,
     notes: item.notes,
     brand: item.brand,
     model: item.model,
     barcode: item.barcode,
+    contents: item.contents,
   };
 }
 
-const COMPARED = ['code', 'name', 'category', 'locationCode', 'quantity', 'unit', 'condition', 'notes', 'brand', 'model', 'barcode'];
-const sameItem = (a, b) => COMPARED.every((k) => a[k] === b[k]);
+const COMPARED = ['code', 'name', 'category', 'locationCode', 'quantity', 'unit', 'goodQty', 'badQty', 'notes', 'brand', 'model', 'barcode', 'contents'];
+const same = (a, b) => (Array.isArray(a) || Array.isArray(b) ? JSON.stringify(a ?? []) === JSON.stringify(b ?? []) : a === b);
+const sameItem = (a, b) => COMPARED.every((k) => same(a[k], b[k]));
+const appendNote = (notes, text) => (notes ? (notes.includes(text) ? notes : `${notes} ${text}`) : text);
+const show = (v) => (v === null || v === undefined ? '-' : v);
+/** Identity of an item for barcode ownership (code, else location + folded name). */
+const identity = (item) => (item.code ? `code:${String(item.code).toUpperCase()}` : `place:${item.locationCode ?? ''}|${foldName(item.name)}`);
+const keyString = (key) => (key.type === 'code' ? `code:${key.code.toUpperCase()}` : `place:${key.locationCode ?? ''}|${key.nameKey}`);
+/** How an item is named in messages: its code if it has one, else location + name. */
+const label = (item) => item.code ?? (item.locationCode ? `${item.locationCode} ${item.name}` : item.name);
 
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {Buffer} buffer
  * @param {{ ext: '.xlsx'|'.csv', dryRun: boolean }} opts
  *
- * Counts are per distinct code: created (new code), updated (existing item that changes),
- * unchanged (existing item the file leaves as it is). A code that appears on several rows is one
- * item: later rows are applied on top of earlier ones (warning), and its single preview entry
- * shows the final result.
+ * Counts are per distinct item: created, updated (existing item that changes), unchanged.
+ * - A code that appears on several rows is one item: later rows are applied on top (warning).
+ * - The same location + name twice (no code): the first row is kept, the later one ignored (warning).
  */
 export function importItems(db, buffer, opts) {
   return runExclusive(() => importItemsNow(db, buffer, opts));
@@ -140,28 +168,37 @@ export async function runExclusive(fn) {
 }
 
 async function importItemsNow(db, buffer, { ext, dryRun }) {
-  const rows = await readSpreadsheet(buffer, ext);
+  const book = await readWorkbook(buffer, ext);
+  const rows = book.main?.rows ?? [];
   if (rows.length === 0) throw badRequest('The file is empty.');
   const plan = buildImportPlan(rows);
-  if (plan.records.length + plan.skipped > MAX_IMPORT_ROWS) throw tooManyRows();
+  if (plan.records.length + plan.skipped + plan.emptyCompartments.length > MAX_IMPORT_ROWS) throw tooManyRows();
 
   const errors = [...plan.errors];
+  const corrections = [...plan.corrections];
   let skipped = plan.skipped;
 
-  // 1) Work out every code's final state in memory (identical for dry and real runs).
-  const byCode = new Map(); // code -> { firstRow, lastRow, original (DB item or null), item (final) }
-  // The file's view of barcode ownership (key ignores leading zeros): code, or null when a row moved
-  // that barcode off its item. Anything not in here is looked up in the DB. Dry and real runs use
-  // exactly this same planning, so their results agree.
+  // 1) Work out every item's final state in memory (identical for dry and real runs).
+  const byKey = new Map(); // key -> { firstRow, lastRow, original (DB item or null), item (final) }
+  // The file's view of barcode ownership (key ignores leading zeros): item identity, or null when a row
+  // moved that barcode off its item. Anything not in here is looked up in the DB.
   const barcodeOwner = new Map();
   const ownerOf = (bc) => {
     const k = barcodeKey(bc);
-    return barcodeOwner.has(k) ? barcodeOwner.get(k) : getItemByBarcode(db, bc)?.code ?? null;
+    if (barcodeOwner.has(k)) return barcodeOwner.get(k);
+    const owner = getItemByBarcode(db, bc);
+    return owner ? { id: identity(owner), label: label(owner) } : null;
   };
-  for (const { row, data } of plan.records) {
-    const code = data.code.toUpperCase();
-    const entry = byCode.get(code);
-    const original = entry ? entry.original : getItemByCode(db, code);
+  for (const record of plan.records) {
+    const { row, data, key } = record;
+    const k = keyString(key);
+    const entry = byKey.get(k);
+    if (entry && key.type === 'place') {
+      errors.push({ row, message: `Warning: duplicate row (${label(entry.item)}) ignored — check the Excel (first seen on row ${entry.firstRow})` });
+      continue;
+    }
+    const original = entry ? entry.original
+      : key.type === 'code' ? getItemByCode(db, key.code) : findByLocationAndName(db, key.locationCode, data.name);
     const current = entry ? entry.item : original;
     if (data.barcode) {
       if (current?.barcode && barcodeKey(current.barcode) === barcodeKey(data.barcode)) {
@@ -169,15 +206,15 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
       } else {
         // A barcode identifies one item: never take it from another item (DB or earlier row).
         const owner = ownerOf(data.barcode);
-        if (owner && owner !== code) {
-          errors.push({ row, message: `Warning: barcode ${data.barcode} already belongs to item ${owner}; barcode not changed` });
+        if (owner && owner.id !== k) {
+          errors.push({ row, message: `Warning: barcode ${data.barcode} already belongs to item ${owner.label}; barcode not changed` });
           delete data.barcode;
         }
       }
     }
     let item;
     try {
-      item = current ? mergeItem(current, updateItemSchema.parse(data)) : buildNewItem(data);
+      item = current ? mergeItem(current, updateItemSchema.parse(data)) : buildNewItem({ ...record.createDefaults, ...data });
     } catch (err) {
       if (!(err instanceof ZodError)) throw err;
       const msg = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
@@ -185,32 +222,52 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
       skipped++;
       continue;
     }
+    for (const note of record.notesAppend) item = { ...item, notes: appendNote(item.notes, note) };
+    if (!current && record.quantityMissing) errors.push({ row, message: 'Warning: quantity missing' });
+    if (record.countsGiven && Number.isInteger(item.quantity) && (item.goodQty !== null || item.badQty !== null)
+        && (item.goodQty ?? 0) + (item.badQty ?? 0) !== item.quantity) {
+      errors.push({ row, message: `Warning: counts don't add up (quantity ${item.quantity}, good ${show(item.goodQty)}, bad ${show(item.badQty)})` });
+    }
     if (current?.barcode !== item.barcode) {
       if (current?.barcode) barcodeOwner.set(barcodeKey(current.barcode), null);
-      if (item.barcode) barcodeOwner.set(barcodeKey(item.barcode), code);
+      if (item.barcode) barcodeOwner.set(barcodeKey(item.barcode), { id: k, label: label(item) });
     }
     if (entry) {
-      errors.push({ row, message: `Warning: code ${code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
+      errors.push({ row, message: `Warning: code ${key.code} also appears on row ${entry.lastRow}; this row is applied on top of it` });
       entry.item = item;
       entry.lastRow = row;
     } else {
-      byCode.set(code, { firstRow: row, lastRow: row, original, item });
+      byKey.set(k, { firstRow: row, lastRow: row, original, item });
     }
   }
 
-  // 2) Real run: one write per code, all in one transaction. Unchanged items are not written,
+  // 2) Kits: an extra sheet named like an item ("Patrol Box") lists what that item contains.
+  const kits = [];
+  for (const sheet of book.others) {
+    const targets = [...byKey.values()].filter((e) => foldName(e.item.name) === foldName(sheet.name));
+    if (targets.length === 0) continue;
+    const kit = buildKitContents(sheet.rows, sheet.name);
+    if (!kit || kit.contents.length === 0) continue;
+    corrections.push(...kit.corrections);
+    for (const e of targets) e.item = { ...e.item, contents: kit.contents };
+    kits.push({ name: sheet.name, items: kit.contents.length, appliedTo: targets.length });
+  }
+
+  // 3) Real run: one write per item, all in one transaction. Unchanged items are not written,
   //    even when several rows changed them and changed them back. Barcodes that move are freed
   //    first, so the write order can never trip the unique index.
   if (!dryRun) {
     db.transaction(() => {
-      for (const { original, item } of byCode.values()) {
+      for (const { original, item } of byKey.values()) {
         if (original?.barcode && original.barcode !== item.barcode) clearBarcode(db, original.id);
       }
-      for (const entry of byCode.values()) {
-        const values = Object.fromEntries(COMPARED.map((k) => [k, entry.item[k]]));
+      for (const entry of byKey.values()) {
+        const values = Object.fromEntries(COMPARED.map((f) => [f, entry.item[f]]));
         if (!entry.original) entry.item = createItem(db, values);
         else if (!sameItem(entry.original, entry.item)) entry.item = updateItem(db, entry.original.id, values);
       }
+      for (const { code } of plan.emptyCompartments) registerCompartment(db, code);
+      for (const { item } of byKey.values()) registerCompartment(db, item.locationCode);
     })();
   }
 
@@ -225,8 +282,12 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
     headerRow: plan.headerRow,
     columns: plan.mapping,
     ignoredColumns: plan.ignoredColumns,
+    sections: plan.sections,
+    emptyCompartments: plan.emptyCompartments.length,
+    corrections: corrections.sort((a, b) => (a.sheet ? 1 : 0) - (b.sheet ? 1 : 0) || a.row - b.row),
+    kits,
   };
-  for (const { firstRow, original, item } of byCode.values()) {
+  for (const { firstRow, original, item } of byKey.values()) {
     const action = !original ? 'create' : sameItem(original, item) ? 'unchanged' : 'update';
     result[action === 'create' ? 'created' : action === 'update' ? 'updated' : 'unchanged']++;
     if (result.preview.length < PREVIEW_ROWS) {
@@ -236,51 +297,45 @@ async function importItemsNow(db, buffer, { ext, dryRun }) {
   return result;
 }
 
-/** Build the downloadable template workbook. */
+/** Build the downloadable template workbook (Phase 1.6 columns, v2 locations). */
 export async function buildTemplate() {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'e-Troop Store Room';
   wb.created = new Date();
   const ws = wb.addWorksheet('Items', { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = [
-    { header: 'Code', key: 'code', width: 14 },
-    { header: 'Name', key: 'name', width: 32 },
-    { header: 'Category', key: 'category', width: 16 },
     { header: 'Location', key: 'location', width: 12 },
+    { header: 'Item description', key: 'name', width: 32 },
     { header: 'Quantity', key: 'quantity', width: 10 },
     { header: 'Unit', key: 'unit', width: 10 },
-    { header: 'Condition', key: 'condition', width: 14 },
+    { header: 'Good', key: 'good', width: 8 },
+    { header: 'Bad', key: 'bad', width: 8 },
+    { header: 'Brand', key: 'brand', width: 14 },
+    { header: 'Model', key: 'model', width: 14 },
+    { header: 'Barcode', key: 'barcode', width: 16 },
     { header: 'Notes', key: 'notes', width: 40 },
   ];
-  // Example codes are deliberately not real item codes, so importing an untouched template changes nothing real.
-  ws.addRow({ code: 'EXAMPLE-1', name: '4-man dome tent', category: 'Tents', location: 'R03-B-2', quantity: 1, unit: 'pcs', condition: 'good', notes: 'Example row - replace or delete before importing' });
-  ws.addRow({ code: 'EXAMPLE-2', name: 'Manila rope 10 m', category: 'Ropes', location: 'R05-A-1', quantity: 6, unit: 'coils', condition: 'needs_repair', notes: 'Example row - replace or delete before importing' });
+  // Examples use rack "EX", so importing an untouched template only adds two obvious example rows.
+  ws.addRow({ location: 'EX0101', name: 'Dome tent (example)', quantity: 4, unit: 'pcs', good: 3, bad: 1, brand: 'Coleman', model: 'Sundome 4', barcode: '', notes: 'Example row - replace or delete before importing' });
+  ws.addRow({ location: 'EX0102', name: 'Tent pegs (example)', quantity: 'a box', unit: '', good: 'a box', bad: '', brand: '', model: '', barcode: '', notes: 'Example row - replace or delete before importing' });
   const head = ws.getRow(1);
   head.font = { bold: true };
   head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F0E0' } };
-  for (let r = 2; r <= 500; r++) {
-    ws.getCell(`G${r}`).dataValidation = {
-      type: 'list',
-      allowBlank: true,
-      formulae: ['"good,needs_repair,damaged,written_off"'],
-      showErrorMessage: false,
-    };
-  }
 
   const help = wb.addWorksheet('How to fill in');
   help.columns = [{ width: 18 }, { width: 90 }];
   [
     ['Column', 'What to enter'],
-    ['Code', 'Required. Unique item code, e.g. TNT-004 (the EXAMPLE rows are only examples). Importing the same code again updates that item.'],
-    ['Name', 'Required. What the item is, e.g. "4-man dome tent".'],
-    ['Category', 'Optional. e.g. Tents, Cooking, Ropes, Tools, First Aid, Flags.'],
-    ['Location', 'Rack-Shelf-Bin, e.g. R03-B-2 (Rack 03, Shelf B (A = top), Bin 2). "R3 B 2", "3/B/2", "R03-B" or "R03" also work. You may use separate Rack / Shelf / Bin columns instead.'],
-    ['Quantity', 'Whole number, default 1.'],
-    ['Unit', 'Default "pcs".'],
-    ['Condition', 'good, needs_repair, damaged or written_off (Malay also accepted: baik, rosak sikit, rosak, lupus).'],
+    ['Location', 'Rack + level + compartment, e.g. AU0305 = Rack AU, Level 03 (01 is the bottom), Compartment 05. "AU 03 05" and "AU-3-5" work too. A location with no item description = an empty compartment. Rows like "RACK AU" are section headings.'],
+    ['Item description', 'Required. What the item is, e.g. "Dome tent". The same location + description again updates that item.'],
+    ['Quantity', 'A number, or text such as "a box", "2 box", "3 small box". Leave empty if not counted.'],
+    ['Unit', 'Optional; default "pcs" (or the word after the number, e.g. "box").'],
+    ['Good / Bad', 'How many are in good / bad condition (numbers).'],
+    ['Brand / Model / Barcode', 'Optional; they help the Scan screen recognise the item.'],
     ['Notes', 'Anything else.'],
+    ['Kits', 'Add a sheet named exactly like an item (e.g. "Patrol Box") with columns Item description + Quantity to list what that kit contains.'],
     ['', ''],
-    ['Malay headers', 'Kod, Nama, Kategori, Lokasi / Koordinat, Kuantiti / Jumlah, Keadaan, Catatan are recognised too.'],
+    ['Other headers', 'CODE (used as the location when it holds codes like AU0305), ITEM DESCRIPTION, GOOD CONDITION, BAD CONDITION, Lokasi, Nama, Kuantiti, Baik, Rosak, Catatan are recognised too.'],
   ].forEach((r) => help.addRow(r));
   help.getRow(1).font = { bold: true };
 

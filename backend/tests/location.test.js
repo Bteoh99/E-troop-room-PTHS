@@ -2,7 +2,8 @@
 import { describe, it, expect } from 'vitest';
 import { parseLocation, normalizeRack, combineLocation, formatRack } from '../src/lib/location.js';
 
-const loc = (locationCode, rack, shelf, bin) => ({ locationCode, rack, shelf, bin });
+// Phase 1.6: results also carry level/compartment (v2 AU0305 scheme); legacy results have them null.
+const loc = (locationCode, rack, shelf, bin) => ({ locationCode, rack, level: null, compartment: null, shelf, bin });
 
 describe('parseLocation - formats listed in the spec', () => {
   it.each([
@@ -68,7 +69,7 @@ describe('parseLocation - empty and garbage input', () => {
     'R03-BB-2',
     'R03-1-2',
     'R3-B-2-5',
-    'R1234',
+    // 'R1234' moved out (Phase 1.6 ambiguity rule: letters + 4 digits is a v2 location R1234)
     'R03-B-2 (top)',
     '???',
     'R',
@@ -101,7 +102,11 @@ describe('normalizeRack / formatRack', () => {
     expect(normalizeRack(input)).toBe(expected);
   });
 
-  it.each([null, undefined, '', 'abc', 'R03-B', 'R', 'R1234', 'B'])('%j -> null', (input) => {
+  // Phase 1.6: 1-3 letters are a v2 rack id ("abc" -> ABC, "R" -> R, "B" -> B), so they moved to the next test.
+  it.each([['abc', 'ABC'], ['R', 'R'], ['B', 'B'], ['au', 'AU'], ['Rack AU', 'AU']])('v2 rack id %j -> %s', (input, expected) => {
+    expect(normalizeRack(input)).toBe(expected);
+  });
+  it.each([null, undefined, '', 'R03-B', 'R1234', 'AU0305', 'ABCD', '12-3'])('%j -> null', (input) => {
     expect(normalizeRack(input)).toBeNull();
   });
 

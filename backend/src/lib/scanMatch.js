@@ -13,7 +13,9 @@
  *   a low weight, so they can never outrank a real match.
  * Barcodes compare with leading zeros ignored (a UPC that lost its leading 0 in Excel still matches).
  * Brand/model words of 5+ characters may differ by one edit (Damerau: a swap of two neighbours counts 1).
- * Weights: code > barcode > model (exact whole model gets a bonus) > brand > name > category/notes.
+ * Compartment labels: text containing a location such as "AU0305" / "AU 0305" matches every item in
+ * that compartment with score 1 (matchedOn: ["location"]).
+ * Weights: location = code > barcode > model (exact whole model gets a bonus) > brand > name > category/notes.
  */
 
 /** OCR noise and label boilerplate that says nothing about which item it is. */
@@ -25,7 +27,7 @@ export const STOPWORDS = new Set([
 ]);
 
 export const WEIGHTS = {
-  code: 1, weakCode: 0.35, barcode: 0.95, model: 0.5, exactModel: 0.1, brand: 0.3, name: 0.3, category: 0.08, notes: 0.08,
+  location: 1, code: 1, weakCode: 0.35, barcode: 0.95, model: 0.5, exactModel: 0.1, brand: 0.3, name: 0.3, category: 0.08, notes: 0.08,
 };
 /** Below this an item is not a "sensible" match. */
 export const MIN_SCORE = 0.15;
@@ -105,6 +107,8 @@ export function buildScanIndex(items) {
     maxLen = Math.max(maxLen, code.length, bc ? item.barcode.length : 0);
     return {
       item,
+      location: item.level !== null && item.level !== undefined && item.compartment !== null && item.compartment !== undefined
+        ? item.locationCode : null,
       code,
       weak,
       codeKind: weak ? (!hasLetter(raw) ? 'digits' : !hasDigit(raw) ? 'letters' : 'short') : 'strong',
@@ -143,6 +147,12 @@ export function analyzeText(text, maxLen = 20) {
     }
   }
   const zeroless = (set) => new Set([...set].map((w) => w.replace(/^0+(?=.)/, '')));
+  // Compartment labels ("AU0305", "AU 0305", "AU-03-05"); OCR often reads 0 as O.
+  const locations = new Set();
+  const upper = String(text ?? '').slice(0, MAX_TEXT).toUpperCase();
+  for (const m of upper.matchAll(/(?<![A-Z0-9])([A-Z]{1,3})[\s-]?([0-9O]{2})[\s-]?([0-9O]{2})(?![0-9])/g)) {
+    locations.add(`${m[1]}${m[2]}${m[3]}`.replace(/(?<=^[A-Z]{1,3}.*)O/g, '0'));
+  }
   const tokens = tokenize(raw.join(' '));
   return {
     tokens,
@@ -153,6 +163,7 @@ export function analyzeText(text, maxLen = 20) {
     digitWords,
     joined,
     barcodeWindows: zeroless(new Set([...singles, ...joined])),
+    locations,
     empty: raw.length === 0,
   };
 }
@@ -205,6 +216,8 @@ export function scoreEntry(e, a) {
       matchedOn.push(field);
     }
   };
+  // A photographed compartment label: every item in that compartment.
+  if (e.location) add('location', a.locations.has(e.location) ? WEIGHTS.location : 0);
   add('code', codeMatch(e, a));
   if (e.barcode) add('barcode', a.barcodeWindows.has(e.barcode) ? WEIGHTS.barcode : 0);
   if (e.modelWhole) {
@@ -241,7 +254,7 @@ export function matchItems(itemsOrIndex, { text = '', barcode = null } = {}) {
     if (exact) return { matches: [{ item: exact.item, score: 1, matchedOn: ['barcode'] }], query };
     // A shop barcode may also have been used as the troop's own item code.
     const folded = ocrFold(barcode);
-    const byCode = index.entries.find((e) => e.code === folded);
+    const byCode = index.entries.find((e) => e.code && e.code === folded);
     if (byCode) return { matches: [{ item: byCode.item, score: 1, matchedOn: ['code'] }], query };
   }
   if (a.empty) return { matches: [], query };
@@ -251,6 +264,7 @@ export function matchItems(itemsOrIndex, { text = '', barcode = null } = {}) {
     const { score, matchedOn } = scoreEntry(e, a);
     if (score >= MIN_SCORE) matches.push({ item: e.item, score, matchedOn });
   }
-  matches.sort((x, y) => y.score - x.score || y.matchedOn.length - x.matchedOn.length || x.item.code.localeCompare(y.item.code));
+  const tie = (it) => `${it.code ?? ''}\u0000${it.locationCode ?? ''}\u0000${it.name ?? ''}`;
+  matches.sort((x, y) => y.score - x.score || y.matchedOn.length - x.matchedOn.length || tie(x.item).localeCompare(tie(y.item)));
   return { matches: matches.slice(0, MAX_MATCHES), query };
 }

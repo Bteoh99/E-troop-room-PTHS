@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { makeApp, createItems, expectItemShape, expectErrorShape } from './helpers.js';
-import { SEED_ITEMS } from '../scripts/seed.js';
+import { LEGACY_SEED_ITEMS as SEED_ITEMS } from './fixtures/legacy-seed.js'; // Phase 1 demo data (the app seed changed in 1.6)
 
 const codes = (res) => res.body.items.map((i) => i.code);
 const search = (app, query) => request(app).get('/api/items').query(query);
@@ -194,22 +194,26 @@ describe('GET /api/items - filters', () => {
     expect(codes(await search(app, { rack: 'abc' }))).toEqual([]);
   });
 
-  it('condition', async () => {
-    expect(codes(await search(app, { condition: 'damaged' }))).toEqual(['A2', 'B1']);
-    expect(codes(await search(app, { condition: 'written_off' }))).toEqual(['C1']);
+  // Phase 1.6: the condition filter was replaced by status (condition on write became good/bad counts:
+  // good -> ok; needs_repair / damaged / written_off -> attention).
+  it('status (replaces the condition filter)', async () => {
+    expect(codes(await search(app, { status: 'attention' }))).toEqual(['A2', 'B1', 'B2', 'C1']);
+    expect(codes(await search(app, { status: 'ok' }))).toEqual(['A1']);
+    expect(codes(await search(app, { status: 'unchecked' }))).toEqual([]);
+    expect(codes(await search(app, { status: '' }))).toHaveLength(5);
     expect(codes(await search(app, { condition: '' }))).toHaveLength(5);
   });
 
-  it('invalid condition -> 400', async () => {
-    const res = await search(app, { condition: 'broken' });
+  it.each([{ condition: 'damaged' }, { condition: 'broken' }, { status: 'broken' }])('retired/invalid filter %j -> 400', async (query) => {
+    const res = await search(app, query);
     expect(res.status).toBe(400);
     expectErrorShape(expect, res.body);
   });
 
   it('filters combine with each other and with q', async () => {
-    expect(codes(await search(app, { category: 'tents', condition: 'damaged' }))).toEqual(['A2']);
-    expect(codes(await search(app, { q: 'rope', condition: 'damaged' }))).toEqual(['B1']);
-    expect(codes(await search(app, { q: 'tent', rack: 'r3', condition: 'good' }))).toEqual(['A1']);
+    expect(codes(await search(app, { category: 'tents', status: 'attention' }))).toEqual(['A2']);
+    expect(codes(await search(app, { q: 'rope', status: 'attention' }))).toEqual(['B1', 'B2']);
+    expect(codes(await search(app, { q: 'tent', rack: 'r3', status: 'ok' }))).toEqual(['A1']);
     expect(codes(await search(app, { q: 'r3', category: 'Ropes' }))).toEqual([]);
   });
 });

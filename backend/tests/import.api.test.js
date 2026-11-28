@@ -36,10 +36,12 @@ describe('POST /api/import - response shape and dry run', () => {
     for (const p of res.body.preview) expect(Object.keys(p).sort()).toEqual(PREVIEW_KEYS);
     expect(res.body.preview[0]).toEqual({
       row: 2, action: 'create', id: null, code: 'TNT-004', name: '4-man dome tent', category: 'Tents',
-      locationCode: 'R03-B-2', rack: 'R03', shelf: 'B', bin: 2, quantity: 6, unit: 'pcs', condition: 'good', notes: 'Green',
+      locationCode: 'R03-B-2', rack: 'R03', shelf: 'B', bin: 2, quantity: 6, unit: 'pcs', notes: 'Green',
       brand: null, model: null, barcode: null, // Phase 1.5 fields
+      // Phase 1.6: condition good -> counts; level/compartment (v2), derived status, contents
+      level: null, compartment: null, goodQty: 6, badQty: 0, status: 'ok', countsMismatch: false, contents: [],
     });
-    expect(res.body.preview[1]).toMatchObject({ row: 3, code: 'ROP-010', condition: 'needs_repair', unit: 'coils', quantity: 12 });
+    expect(res.body.preview[1]).toMatchObject({ row: 3, code: 'ROP-010', goodQty: 0, badQty: 12, unit: 'coils', quantity: 12 }); // needs repair -> bad
     expect(count()).toBe(0);
   });
 
@@ -85,9 +87,10 @@ describe('POST /api/import - response shape and dry run', () => {
   });
 
   it('dry run with errors writes nothing either', async () => {
-    const file = await xlsx([HEADER, ['A1', 'x'], ['', 'no code'], ['A2', 'y', '', '', '', '', 'weird']]);
+    // Phase 1.6: a row without a code is fine now; a row without a name is still an error
+    const file = await xlsx([HEADER, ['A1', 'x'], ['', 'no code'], ['A3', ''], ['A2', 'y', '', '', '', '', 'weird']]);
     const res = await upload(app, file);
-    expect(res.body.created).toBe(2);
+    expect(res.body.created).toBe(3);
     expect(res.body.skipped).toBe(1);
     expect(count()).toBe(0);
   });
@@ -106,10 +109,11 @@ describe('POST /api/import - header aliases', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ created: 4, skipped: 0, errors: [], ignoredColumns: ['Bil'] });
     expect(res.body.columns).toEqual({ code: 1, name: 2, category: 3, location: 4, quantity: 5, condition: 6, notes: 7 });
-    expect(byCode('KHM-001')).toMatchObject({ name: 'Khemah 4 orang', category: 'Khemah', location_code: 'R01-A-1', quantity: 3, condition: 'good', notes: 'Hijau' });
-    expect(byCode('KHM-002').condition).toBe('damaged');
-    expect(byCode('PRK-001')).toMatchObject({ condition: 'needs_repair', location_code: 'R02-B', bin: null });
-    expect(byCode('BDR-001')).toMatchObject({ condition: 'written_off', location_code: 'R06', shelf: null });
+    // Phase 1.6: Keadaan becomes good/bad counts (good -> good = quantity; rosak / rosak sikit / lupus -> bad = quantity)
+    expect(byCode('KHM-001')).toMatchObject({ name: 'Khemah 4 orang', category: 'Khemah', location_code: 'R01-A-1', quantity: 3, good_qty: 3, bad_qty: 0, notes: 'Hijau' });
+    expect(byCode('KHM-002')).toMatchObject({ good_qty: 0, bad_qty: 2 });
+    expect(byCode('PRK-001')).toMatchObject({ good_qty: 0, bad_qty: 1, location_code: 'R02-B', bin: null });
+    expect(byCode('BDR-001')).toMatchObject({ good_qty: 0, bad_qty: 1, notes: 'Written off', location_code: 'R06', shelf: null });
   });
 
   it.each([
@@ -152,15 +156,16 @@ describe('POST /api/import - header aliases', () => {
     const res = await upload(app, file, 'a.xlsx', real);
     expect(res.status).toBe(400);
     expectErrorShape(expect, res.body);
-    expect(res.body.error.details.missingColumns).toEqual(['code', 'name']);
+    expect(res.body.error.details.missingColumns).toEqual(['name']); // Phase 1.6: only a name column is required
     expect(res.body.error.details.headersFound).toEqual(['Thing', 'Where', 'How many']);
     expect(count()).toBe(0);
   });
 
-  it('only name column -> 400 missing code', async () => {
+  it('name + location columns without codes are enough (Phase 1.6: codes are optional)', async () => {
     const res = await upload(app, csv([['Name', 'Location'], ['Tent', 'R1']]), 'a.csv');
-    expect(res.status).toBe(400);
-    expect(res.body.error.details.missingColumns).toEqual(['code']);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ created: 1, skipped: 0 });
+    expect(res.body.preview[0]).toMatchObject({ code: null, name: 'Tent', locationCode: 'R01' });
   });
 });
 
@@ -218,19 +223,24 @@ describe('POST /api/import - separate rack / shelf / bin columns', () => {
 
 describe('POST /api/import - values', () => {
   it('condition mapping incl. Malay; unknown -> good + warning (row still imported)', async () => {
+    // Phase 1.6: condition becomes counts (quantity defaults to 1 without a Qty column):
+    // good -> good 1 / bad 0; any other recognised condition -> good 0 / bad 1; blank or unknown -> not counted.
+    const G = { good_qty: 1, bad_qty: 0 };
+    const B = { good_qty: 0, bad_qty: 1 };
+    const N = { good_qty: null, bad_qty: null };
     const conds = [
-      ['good', 'good'], ['Baik', 'good'], ['OK', 'good'],
-      ['repair', 'needs_repair'], ['Needs Repair', 'needs_repair'], ['rosak sikit', 'needs_repair'],
-      ['damaged', 'damaged'], ['Rosak', 'damaged'],
-      ['written off', 'written_off'], ['Lupus', 'written_off'],
-      ['', 'good'], ['excellent', 'good'],
+      ['good', G], ['Baik', G], ['OK', G],
+      ['repair', B], ['Needs Repair', B], ['rosak sikit', B],
+      ['damaged', B], ['Rosak', B],
+      ['written off', B], ['Lupus', B],
+      ['', N], ['excellent', N],
     ];
     const file = await xlsx([['Code', 'Name', 'Keadaan'], ...conds.map(([c], i) => [`C${i}`, 'x', c])]);
     const res = await upload(app, file, 'a.xlsx', real);
     expect(res.status).toBe(200);
     expect(res.body.created).toBe(conds.length);
     expect(res.body.skipped).toBe(0);
-    conds.forEach(([, expected], i) => expect(byCode(`C${i}`).condition).toBe(expected));
+    conds.forEach(([, expected], i) => expect(byCode(`C${i}`)).toMatchObject(expected));
     expect(res.body.errors).toHaveLength(1);
     expect(res.body.errors[0].row).toBe(conds.length + 1);
     expect(res.body.errors[0].message).toMatch(/^Warning:.*excellent/);
@@ -249,16 +259,20 @@ describe('POST /api/import - values', () => {
     ]);
     const res = await upload(app, file, 'a.xlsx', real);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ created: 2, updated: 0, skipped: 3 });
-    expect(res.body.errors.map((e) => e.row)).toEqual([4, 5, 6]);
-    expect(res.body.errors.every((e) => !e.message.startsWith('Warning:'))).toBe(true);
-    expect(res.body.errors[0].message).toMatch(/code/i);
-    expect(res.body.errors[1].message).toMatch(/name/i);
-    expect(res.body.preview.map((p) => p.row)).toEqual([2, 8]);
-    expect(count()).toBe(2);
+    // Phase 1.6: row 4 (name, no code) is imported now; only rows without a name are errors
+    expect(res.body).toMatchObject({ created: 3, updated: 0, skipped: 2 });
+    // (rows 2, 4 and 8 also get "Warning: quantity missing": the Quantity column exists but is blank)
+    const rowErrors = res.body.errors.filter((e) => !e.message.startsWith('Warning:'));
+    expect(rowErrors.map((e) => e.row)).toEqual([5, 6]);
+    expect(rowErrors[0].message).toMatch(/name/i);
+    expect(rowErrors[1].message).toMatch(/name/i);
+    expect(res.body.errors.filter((e) => e.message === 'Warning: quantity missing').map((e) => e.row)).toEqual([2, 4, 8]);
+    expect(res.body.preview.map((p) => p.row)).toEqual([2, 4, 8]);
+    expect(count()).toBe(3);
   });
 
-  it('quantity: "5 pcs" -> 5 + unit, bad quantity -> warning and default 1, too large -> row error', async () => {
+  // Phase 1.6: an unreadable or missing quantity on a NEW item means "not counted" (null), with a warning
+  it('quantity: "5 pcs" -> 5 + unit, bad quantity -> warning and null, too large -> row error', async () => {
     const file = await xlsx([
       ['Code', 'Name', 'Qty'],
       ['Q1', 'a', '5 pcs'],
@@ -272,15 +286,15 @@ describe('POST /api/import - values', () => {
     const res = await upload(app, file, 'a.xlsx', real);
     expect(res.status).toBe(200);
     expect(byCode('Q1')).toMatchObject({ quantity: 5, unit: 'pcs' });
-    expect(byCode('Q2').quantity).toBe(1);
-    expect(byCode('Q3').quantity).toBe(1);
-    expect(byCode('Q4').quantity).toBe(1);
+    expect(byCode('Q2').quantity).toBeNull();
+    expect(byCode('Q3').quantity).toBeNull();
+    expect(byCode('Q4').quantity).toBeNull();
     expect(byCode('Q5').quantity).toBe(1200);
     expect(byCode('Q6')).toBeUndefined();
-    expect(byCode('Q7').quantity).toBe(1);
+    expect(byCode('Q7').quantity).toBeNull();
     expect(res.body.skipped).toBe(1);
     const warnRows = res.body.errors.filter((e) => e.message.startsWith('Warning:')).map((e) => e.row);
-    expect(warnRows).toEqual([3, 4, 5]);
+    expect(warnRows).toEqual([3, 4, 5, 8]); // row 8: quantity missing
     expect(res.body.errors.find((e) => e.row === 7).message).not.toMatch(/^Warning:/);
   });
 
@@ -329,7 +343,7 @@ describe('POST /api/import - values', () => {
     }
     expect(dry.body.created + dry.body.updated).toBe(res.body.created + res.body.updated);
     expect(count()).toBe(1);
-    expect(byCode('A1')).toMatchObject({ name: 'second', quantity: 2 });
+    expect(byCode('A1')).toMatchObject({ name: 'Second', quantity: 2 }); // Phase 1.6 tidy: first letter capitalised
   });
 
   it('errors are sorted by row', async () => {
@@ -341,7 +355,7 @@ describe('POST /api/import - values', () => {
     ]), 'a.csv');
     const rows = res.body.errors.map((e) => e.row);
     expect(rows).toEqual([...rows].sort((a, b) => a - b));
-    expect(rows).toEqual([2, 2, 3, 4]);
+    expect(rows).toEqual([2, 2, 4]); // Phase 1.6: row 3 (name without code) is no longer an error
   });
 
   it('preview holds only the first 20 rows; counts cover all rows', async () => {
@@ -379,7 +393,7 @@ describe('POST /api/import - upsert by code', () => {
     const item = (await request(app).get(`/api/items/${existing.id}`)).body;
     expect(item).toMatchObject({
       name: 'Renamed', category: 'Tents', locationCode: 'R01-A-1', rack: 'R01', quantity: 6,
-      unit: 'tents', condition: 'damaged', notes: 'keep me', createdAt: existing.createdAt,
+      unit: 'tents', goodQty: 0, badQty: 6, status: 'attention', notes: 'keep me', createdAt: existing.createdAt, // condition damaged -> counts
     });
   });
 
@@ -458,9 +472,10 @@ describe('POST /api/import - CSV specifics', () => {
 
   it('blank lines in CSV are ignored and row numbers match file lines', async () => {
     const res = await upload(app, Buffer.from('Code,Name\n\nA1,a\n,,\n,b\n'), 'a.csv');
-    expect(res.body.created).toBe(1);
-    expect(res.body.preview[0].row).toBe(3);
-    expect(res.body.errors).toEqual([{ row: 5, message: expect.stringMatching(/code/i) }]);
+    // Phase 1.6: ",b" (name, no code) is an item now
+    expect(res.body.created).toBe(2);
+    expect(res.body.preview.map((p) => p.row)).toEqual([3, 5]);
+    expect(res.body.errors).toEqual([]);
   });
 });
 
@@ -587,7 +602,8 @@ describe('GET /api/import/template', () => {
     const wb = await readXlsx(res.body);
     const ws = wb.worksheets[0];
     const header = ws.getRow(1).values.slice(1);
-    expect(header).toEqual(['Code', 'Name', 'Category', 'Location', 'Quantity', 'Unit', 'Condition', 'Notes']);
+    // Phase 1.6 template columns
+    expect(header).toEqual(['Location', 'Item description', 'Quantity', 'Unit', 'Good', 'Bad', 'Brand', 'Model', 'Barcode', 'Notes']);
     let dataRows = 0;
     ws.eachRow((row, n) => { if (n > 1 && row.getCell(1).value) dataRows++; });
     expect(dataRows).toBe(2);
@@ -598,8 +614,9 @@ describe('GET /api/import/template', () => {
     const res = await upload(app, tpl.body, 'item-template.xlsx');
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ dryRun: true, created: 2, updated: 0, skipped: 0, errors: [], headerRow: 1 });
-    expect(res.body.preview.map((p) => p.locationCode)).toEqual(['R03-B-2', 'R05-A-1']);
-    expect(res.body.preview[1].condition).toBe('needs_repair');
+    expect(res.body.preview.map((p) => p.locationCode)).toEqual(['EX0101', 'EX0102']); // Phase 1.6 example rows
+    expect(res.body.preview[0]).toMatchObject({ quantity: 4, goodQty: 3, badQty: 1, status: 'attention' });
+    expect(res.body.preview[1]).toMatchObject({ quantity: 1, unit: 'box', goodQty: 1 });
     expect(count()).toBe(0);
   });
 });

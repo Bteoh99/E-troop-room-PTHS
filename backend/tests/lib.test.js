@@ -131,17 +131,18 @@ describe('buildImportPlan (pure)', () => {
 
   it('throws 400 with details when code/name columns are missing', () => {
     try {
-      buildImportPlan(rows([['Foo', 'Name'], ['1', 'x']]));
+      // Phase 1.6: only a name column is required (codes are optional)
+      buildImportPlan(rows([['Foo', 'Code'], ['1', 'x']]));
       expect.unreachable();
     } catch (err) {
       expect(err.status).toBe(400);
-      expect(err.details.missingColumns).toEqual(['code']);
-      expect(err.details.headersFound).toEqual(['Foo', 'Name']);
+      expect(err.details.missingColumns).toEqual(['name']);
+      expect(err.details.headersFound).toEqual(['Foo', 'Code']);
     }
   });
 
   it('only includes fields whose column exists', () => {
     const plan = buildImportPlan(rows([['Code', 'Name'], ['a1', 'Tent']]));
-    expect(plan.records).toEqual([{ row: 2, data: { code: 'A1', name: 'Tent' } }]);
+    expect(plan.records.map(({ row, data }) => ({ row, data }))).toEqual([{ row: 2, data: { code: 'A1', name: 'Tent' } }]); // records carry more planning info since 1.6
   });
 });

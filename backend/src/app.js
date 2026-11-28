@@ -12,6 +12,7 @@ import { categoriesRouter } from './routes/categories.js';
 import { racksRouter } from './routes/racks.js';
 import { importRouter, MAX_UPLOAD_BYTES } from './routes/import.js';
 import { scanRouter } from './routes/scan.js';
+import { compartmentsRouter } from './routes/compartments.js';
 
 const BACKEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -122,6 +123,7 @@ export function createApp(db = openDb(), opts = {}) {
   api.use('/items', writesNeedLeader, itemsRouter(db));
   api.use('/categories', categoriesRouter(db));
   api.use('/racks', racksRouter(db));
+  api.use('/compartments', writesNeedLeader, compartmentsRouter(db));
   api.use('/import', writesNeedLeader, importRouter(db)); // template download (GET) stays public
   api.use('/scan', scanRouter(db, opts.scan)); // public, throttled per IP
   api.use((req, res) => {

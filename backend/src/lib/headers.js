@@ -6,7 +6,7 @@
 /** Field -> aliases, in priority order (first alias found wins when several columns match). */
 export const HEADER_ALIASES = {
   code: ['code', 'item code', 'itemcode', 'kod', 'kod item', 'kod barang', 'item no', 'item id', 'id'],
-  name: ['name', 'item name', 'nama', 'nama item', 'nama barang', 'item', 'barang', 'description', 'keterangan'],
+  name: ['name', 'item name', 'item description', 'nama', 'nama item', 'nama barang', 'item', 'barang', 'description', 'keterangan'],
   location: ['location', 'coordinate', 'coordinates', 'koordinat', 'lokasi', 'rack location', 'location code', 'kedudukan'],
   category: ['category', 'kategori', 'type', 'jenis'],
   quantity: ['qty', 'quantity', 'kuantiti', 'jumlah', 'bilangan', 'count'],
@@ -19,9 +19,12 @@ export const HEADER_ALIASES = {
   brand: ['brand', 'jenama', 'manufacturer', 'make', 'pengeluar'],
   model: ['model', 'model no', 'model number', 'no model'],
   barcode: ['barcode', 'kod bar', 'ean', 'upc'],
+  goodQty: ['good condition', 'good', 'good qty', 'qty good', 'baik', 'keadaan baik', 'bilangan baik'],
+  badQty: ['bad condition', 'bad', 'bad qty', 'qty bad', 'rosak', 'keadaan rosak', 'bilangan rosak'],
 };
 
-export const REQUIRED_FIELDS = ['code', 'name'];
+/** Since Phase 1.6 only a name column is required (codes are optional; the real file's CODE is a location). */
+export const REQUIRED_FIELDS = ['name'];
 
 /** "Item Code:" -> "itemcode" */
 export function normalizeHeader(h) {
@@ -87,13 +90,13 @@ export function mapHeaders(headerCells) {
 }
 
 /**
- * Find the header row among the first `maxScan` rows (real spreadsheets often have a title
+ * Find the header row among the first `maxScan` (20) rows (real spreadsheets often have a title
  * or blank rows above the header). Picks the row with the most recognised headers,
  * preferring rows that contain both code and name.
  * @param {unknown[][]} rows
  * @returns {{ headerIndex: number, mapping: Record<string, number>, unmapped: string[], ignored: string[] } | null}
  */
-export function findHeaderRow(rows, maxScan = 15) {
+export function findHeaderRow(rows, maxScan = 20) {
   let best = null;
   const limit = Math.min(rows.length, maxScan);
   for (let i = 0; i < limit; i++) {

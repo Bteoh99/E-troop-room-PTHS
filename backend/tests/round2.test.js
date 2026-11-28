@@ -13,7 +13,7 @@ const codes = (res) => res.body.items.map((i) => i.code);
 describe('1. shelf/bin words without a rack are not coordinates', () => {
   it.each(['Bin 5', 'Level 2', 'Shelf 3', 'Slot 7', 'Petak 1', 'Pos 3', 'No. 4', 'Position 7', 'Tingkat 2', 'Para 1', 'R3 bin 2'])(
     '%j is kept as text', (s) => {
-      expect(parseLocation(s)).toEqual({ locationCode: s, rack: null, shelf: null, bin: null });
+      expect(parseLocation(s)).toEqual({ locationCode: s, rack: null, level: null, compartment: null, shelf: null, bin: null });
     }
   );
   it.each([
@@ -33,7 +33,7 @@ describe('1. shelf/bin words without a rack are not coordinates', () => {
 
 describe('10. en/em dashes and other hyphen look-alikes are separators', () => {
   it.each(['R03–B–2', 'R03—B—2', 'R03−B−2', 'R03－B－2', 'r3 ‒ b ‒ 2'])('%j -> R03-B-2', (s) => {
-    expect(parseLocation(s)).toEqual({ locationCode: 'R03-B-2', rack: 'R03', shelf: 'B', bin: 2 });
+    expect(parseLocation(s)).toEqual({ locationCode: 'R03-B-2', rack: 'R03', level: null, compartment: null, shelf: 'B', bin: 2 });
   });
 });
 
@@ -53,13 +53,14 @@ describe('2. blank import cells leave existing values unchanged (every field)', 
       ['CKG-012', 'Jerry can 20 L', '', '', '', '', '', ''],
     ]);
     const dry = await upload(app, file, 'a.csv');
-    expect(dry.body.preview[0]).toMatchObject({ action: 'update', id: existing.id, name: 'Jerry can 20 L', condition: 'damaged', locationCode: 'R02-D-1' });
+    // Phase 1.6: "condition damaged" is stored as counts (good 0 / bad 6)
+    expect(dry.body.preview[0]).toMatchObject({ action: 'update', id: existing.id, name: 'Jerry can 20 L', goodQty: 0, badQty: 6, locationCode: 'R02-D-1' });
     const res = await upload(app, file, 'a.csv', real);
     expect(res.body).toMatchObject({ created: 0, updated: 1, skipped: 0, errors: [] });
     const item = (await request(app).get(`/api/items/${existing.id}`)).body;
     expect(item).toMatchObject({
       name: 'Jerry can 20 L', category: 'Cooking', locationCode: 'R02-D-1', rack: 'R02', shelf: 'D', bin: 1,
-      quantity: 6, unit: 'cans', condition: 'damaged', notes: 'Two leak at the tap',
+      quantity: 6, unit: 'cans', goodQty: 0, badQty: 6, status: 'attention', notes: 'Two leak at the tap',
     });
   });
 
@@ -69,10 +70,12 @@ describe('2. blank import cells leave existing values unchanged (every field)', 
   });
 
   it('new items with blank cells still get the defaults', async () => {
-    await upload(app, csv([['Code', 'Name', 'Category', 'Location', 'Qty', 'Unit', 'Condition', 'Notes'], ['NEW-1', 'New', '', '', '', '', '', '']]), 'a.csv', real);
+    const res = await upload(app, csv([['Code', 'Name', 'Category', 'Location', 'Qty', 'Unit', 'Condition', 'Notes'], ['NEW-1', 'New', '', '', '', '', '', '']]), 'a.csv', real);
+    // Phase 1.6: a blank Quantity cell on a new item = not counted (null) + "quantity missing"; no counts yet
     expect(allItems(db).find((r) => r.code === 'NEW-1')).toMatchObject({
-      category: null, location_code: null, rack: null, quantity: 1, unit: 'pcs', condition: 'good', notes: '',
+      category: null, location_code: null, rack: null, quantity: null, unit: 'pcs', good_qty: null, bad_qty: null, notes: '',
     });
+    expect(res.body.errors).toEqual([{ row: 2, message: 'Warning: quantity missing' }]);
   });
 });
 
@@ -214,14 +217,14 @@ describe('9. duplicate code in one file is one item', () => {
     for (const r of [dry, wet]) {
       expect(r.body).toMatchObject({ created: 1, updated: 1, unchanged: 0, skipped: 0 });
       expect(r.body.preview.map((p) => [p.row, p.action, p.code, p.name, p.quantity])).toEqual([
-        [2, 'create', 'NEW-1', 'second', 2],
+        [2, 'create', 'NEW-1', 'Second', 2], // Phase 1.6 tidy: first letter capitalised
         [3, 'update', 'OLD', 'Renamed', 1],
       ]);
       expect(r.body.preview.some((p) => p.action === 'update' && p.id === null)).toBe(false);
       expect(r.body.errors).toHaveLength(1);
       expect(r.body.errors[0]).toMatchObject({ row: 4 });
     }
-    expect(allItems(db).find((i) => i.code === 'NEW-1')).toMatchObject({ name: 'second', quantity: 2 });
+    expect(allItems(db).find((i) => i.code === 'NEW-1')).toMatchObject({ name: 'Second', quantity: 2 });
   });
 });
 
@@ -364,6 +367,7 @@ describe('R2-1: only one import is processed at a time', () => {
 });
 
 describe('R2-3: unknown condition text keeps an existing item\'s condition', () => {
+  // Phase 1.6: counts instead of condition; unknown text never changes them, a new item stays "not counted"
   it('existing damaged item stays damaged (warning); new item gets good', async () => {
     const { app, db } = makeApp();
     await createItems(app, [{ code: 'CKG-012', name: 'Jerry can', condition: 'damaged' }]);
@@ -372,7 +376,7 @@ describe('R2-3: unknown condition text keeps an existing item\'s condition', () 
     expect(res.body.errors.map((e) => e.row)).toEqual([2, 3]);
     expect(res.body.errors.every((e) => e.message.startsWith('Warning:'))).toBe(true);
     const rows = allItems(db);
-    expect(rows.find((r) => r.code === 'CKG-012').condition).toBe('damaged');
-    expect(rows.find((r) => r.code === 'NEW-1').condition).toBe('good');
+    expect(rows.find((r) => r.code === 'CKG-012')).toMatchObject({ good_qty: 0, bad_qty: 1 });
+    expect(rows.find((r) => r.code === 'NEW-1')).toMatchObject({ good_qty: null, bad_qty: null });
   });
 });

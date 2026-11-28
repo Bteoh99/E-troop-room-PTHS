@@ -29,6 +29,7 @@ describe('smoke', () => {
 
   it('parses loose locations', () => {
     expect(parseLocation('3-B-2').locationCode).toBe('R03-B-2');
-    expect(parseLocation('Store cupboard')).toEqual({ locationCode: 'Store cupboard', rack: null, shelf: null, bin: null });
+    expect(parseLocation('Store cupboard')).toEqual({ locationCode: 'Store cupboard', rack: null, level: null, compartment: null, shelf: null, bin: null });
+    expect(parseLocation('au 03 05')).toMatchObject({ locationCode: 'AU0305', rack: 'AU', level: 3, compartment: 5 });
   });
 });

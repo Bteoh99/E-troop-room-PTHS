@@ -10,7 +10,7 @@ serves the built frontend. The contract is `../docs/SPEC.md`; Windows laptop set
 cd backend
 npm install
 npm run set-pin     # leader PIN (6-8 digits; --force repairs a damaged config); without it writes return 403
-npm run seed        # 28 sample items in R01–R06, shelves A–D (only if the DB is empty)
+npm run seed        # 31 demo items in racks BA–BD (AU0305-style locations, good/bad counts, a kit; only if the DB is empty)
 npm run dev         # http://localhost:3001/api, restarts on file changes (frontend via Vite on :5173)
 npm test            # vitest (in-memory DB, temp PIN config)
 
@@ -49,7 +49,9 @@ curl -H 'content-type: application/json' -d '{"text":"Coleman Sundome TNT-OO4"}'
 src/app.js              createApp(db) + lazy default `app` (opens DB_PATH on first request; no listen)
 src/server.js           listens on PORT
 src/db/                 openDb(), migrations (schema_version table; append new versions for Phase 2)
-src/lib/location.js     parseLocation / normalizeRack / combineLocation (pure)
+src/lib/location.js     parseLocation (v2 AU0305 + legacy R03-B-2) / normalizeRack / combineLocation (pure)
+src/lib/corrections.js  import tidy + spelling corrections list (pure; add typos to CORRECTIONS)
+src/lib/quantityText.js "a box", "2 box(24)", "3 small box" -> quantity + unit (pure)
 src/lib/headers.js      Excel header aliases (EN + Malay), mapHeaders, findHeaderRow (pure)
 src/lib/condition.js    mapCondition (EN + Malay) (pure)
 src/lib/importRows.js   spreadsheet rows -> validated item patches, row errors/warnings (pure)
@@ -62,7 +64,7 @@ src/lib/scanMatch.js    scan scoring: OCR folding, tokenising, weighted overlap 
 src/lib/env.js          .env parser/loader (src/loadEnv.js applies backend/.env in entry points)
 src/auth/               leader PIN: config.json (scrypt), signed tokens, wrong-PIN rate limit, middleware
 src/services/backup.js  db.backup() to BACKUP_DIR, rotation, daily schedule
-src/routes/             items, categories, racks, import, scan
+src/routes/             items, categories, racks, compartments, import, scan
 scripts/seed.js         seed data
 scripts/set-pin.js      set/change the leader PIN (hidden prompt, --pin, --check)
 scripts/backup.js       one backup now
@@ -76,23 +78,25 @@ tests/                  vitest + supertest
 - `makeApp()` in `tests/helpers.js` gives a fresh in-memory DB with a temp leader PIN: its `app` sends the
   leader token automatically, `publicApp` does not (for auth tests). Without a PIN the default app is in
   setup-needed mode (writes → 403).
-- `seed(db)` and `SEED_ITEMS` are exported from `scripts/seed.js`.
+- `seed(db)` and `SEED_ITEMS` are exported from `scripts/seed.js`. `makeApp({ seeded: true })` uses the
+  Phase 1 demo list in `tests/fixtures/legacy-seed.js`; `makeApp({ seeded: 'demo' })` uses the new seed.
 
-## Import behaviour (tolerant on purpose — the real file arrives later)
+## Import behaviour (Phase 1.6: built for the troop's real QM list)
 
 - Accepts `.xlsx` and `.csv` up to 5 MB, field name `file`. `dryRun` defaults to `true`.
-- Header row is auto-detected in the first 15 rows (title rows above it are fine). Headers are
-  case/space/punctuation-insensitive and include Malay aliases (`Kod`, `Nama`, `Lokasi`, `Kuantiti`,
-  `Keadaan`, `Catatan`, ...). Separate `Rack` / `Shelf` / `Bin` columns are combined. Unknown and
-  duplicate columns are ignored and listed in `ignoredColumns` (a losing `Description` / `Keterangan`
-  becomes notes if there is no notes column).
-- Uses the first visible sheet that has code + name headers.
-- Rows missing code or name → error, skipped. Blank rows ignored. Odd locations are kept as text
-  (warning). Unknown condition → warning; existing items keep theirs, new items get `good`. Bad quantity → warning, quantity unchanged
-  (1 for new items). `"5 pcs"` → quantity 5, unit `pcs`. Location > 100 chars → warning, not changed.
-- Upsert by code (case-insensitive). **Blank cells and missing columns never change an existing item**;
-  new items get the defaults. Counts are per distinct code: `created`, `updated`, `unchanged`
-  (unchanged items are not written). A code repeated in the file is one item (later rows on top, warning).
+- The header row is found in the first 20 rows. Only a name column (`Item description`, `Name`,
+  `Nama`, ...) is required. Malay and English aliases are recognised, including `GOOD CONDITION` /
+  `BAD CONDITION`.
+- A `CODE` column full of codes like `AU0305` is read as the **location** (rack AU, level 03 from the
+  bottom, compartment 05). `RACK AU` rows are section headings. A code without a description is an
+  **empty compartment**.
+- Quantities may be text (`a box`, `2 box(24)`, `3 small box`). Good/Bad are counts. Warnings cover:
+  counts that don't add up, missing quantity, unreadable counts, and duplicate rows.
+- Names are tidied (spaces, first capital letter). Known typos (`src/lib/corrections.js`) are fixed and
+  listed in `corrections`, both in the dry run and the real run.
+- Upsert by code when a row has one, else by location + name. Blank cells and missing columns never
+  change an existing item. Re-importing the same file changes nothing (`unchanged`).
+- An extra sheet named like an item (e.g. "Patrol Box") becomes that item's kit `contents` (`kits`).
 - A real import runs in a single transaction; a dry run writes nothing.
 - Memory safety: before ExcelJS loads a workbook, `src/lib/xlsxGuard.js` reads the zip directory and
   inflates each entry with a hard cap, rejecting workbooks over 25,000 rows / 240,000 cells / 48 MB of

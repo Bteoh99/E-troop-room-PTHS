@@ -40,9 +40,10 @@ describe('R2 regression: blank cells and long locations on import', () => {
 
   it('a blank Condition cell never resets damaged to good (dry run and real)', async () => {
     const file = csv([['Code', 'Name', 'Keadaan'], ['TNT-004', 'Tent', '']]);
-    expect((await upload(app, file, 'a.csv')).body.preview[0]).toMatchObject({ action: 'unchanged', condition: 'damaged' });
+    // Phase 1.6: "damaged" is stored as counts (good 0 / bad 6); a blank cell keeps them
+    expect((await upload(app, file, 'a.csv')).body.preview[0]).toMatchObject({ action: 'unchanged', goodQty: 0, badQty: 6, status: 'attention' });
     await upload(app, file, 'a.csv', real);
-    expect(allItems(db)[0].condition).toBe('damaged');
+    expect(allItems(db)[0]).toMatchObject({ good_qty: 0, bad_qty: 6 });
   });
 
   it('an over-long location built from Rack/Shelf/Bin columns is a warning, row still imported', async () => {
@@ -98,8 +99,9 @@ describe('R2 regression: duplicate codes and unchanged', () => {
     const wet = await upload(app, file, 'a.csv', real);
     const pick = (b) => ({ ...b, dryRun: undefined, preview: b.preview.map((p) => ({ ...p, id: undefined })) });
     expect(pick(wet.body)).toEqual(pick(dry.body));
-    expect(wet.body).toMatchObject({ created: 1, updated: 1, unchanged: 1, skipped: 1 });
-    expect(wet.body.preview.map((p) => p.action)).toEqual(['unchanged', 'update', 'create']);
+    // Phase 1.6: the row without a code ("x") is an item now (codes are optional)
+    expect(wet.body).toMatchObject({ created: 2, updated: 1, unchanged: 1, skipped: 0 });
+    expect(wet.body.preview.map((p) => p.action)).toEqual(['unchanged', 'update', 'create', 'create']);
   });
 });
 
@@ -396,7 +398,8 @@ describe('R2 JSON bodies', () => {
   it('__proto__ / constructor keys do not pollute anything', async () => {
     const res = await post('{"code":"PR","name":"x","__proto__":{"condition":"damaged"},"constructor":{"prototype":{"x":1}}}');
     expect(res.status).toBe(201);
-    expect(res.body.condition).toBe('good');
+    expect(res.body).not.toHaveProperty('condition'); // Phase 1.6: condition is no longer returned
+    expect(res.body).toMatchObject({ goodQty: null, badQty: null, status: 'unchecked' });
     expect({}.condition).toBeUndefined();
     expect({}.x).toBeUndefined();
     expect(allItems(db)).toHaveLength(1);

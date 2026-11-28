@@ -315,3 +315,106 @@ Replace the demo seed with ~30 realistic items in the **new format** across 4 ra
 - Detail: kit contents table when present ("Each Patrol Box should contain: …").
 - Import preview: corrections table ("Row 51: mosquito repenllent → mosquito repellent"), warnings, empty compartments and section counts, kits found.
 - "Needs a location" page keeps working with the v2 format (rack prefix helper e.g. `AU` then type `0305`).
+
+### Phase 1.6 backend implementation notes (exact shapes; these override earlier notes)
+
+**Locations: one representation for both schemes.** Every Item and every parse result has
+`locationCode, rack, level, compartment, shelf, bin`.
+- **v2** (`AU0305`): `rack: "AU"` (1–3 letters), `level: 3` (1 = **bottom**), `compartment: 5`; `shelf`/`bin` are null.
+  - Partial locations: `"AU03"` → level only, `compartment: null`; `"AU"` / `"Rack AU"` → rack only.
+  - Accepted spellings: `au0305`, `AU 0305`, `AU 03 05`, `AU-03-05`, `AU-3-5`, `AU/03/05`, `Rack AU level 3 compartment 5`, en/em dashes.
+  - Level and compartment must be ≥ 1.
+  - A bare rack id must be typed in capitals (`AU`). Lower-case `au` alone is kept as text in a location field, but **search** treats it as rack AU.
+- **legacy** (`R03-B-2`): `rack: "R03"`, `shelf: "B"`, `bin: 2`; `level`/`compartment` are null.
+- **Parse order:** a full v2 code first (letters + 4 digits is always v2, e.g. `R1234` = rack R, level 12, compartment 34), then legacy, then partial v2.
+- Unparseable text → kept as `locationCode`, everything else null.
+- Display string: "Rack AU · Level 3 · Compartment 05".
+
+**Item (v4)** — exactly these keys:
+`id, code, name, category, locationCode, rack, level, compartment, shelf, bin, quantity, unit, goodQty, badQty, status, countsMismatch, notes, brand, model, barcode, contents, createdAt, updatedAt`.
+- `code`: string or **null**, unique when present (case-insensitive). Optional on create.
+- `quantity`: int ≥ 0 or **null** (not counted). On create, an absent `quantity` = 1; an explicit `null` = not counted.
+- `goodQty`, `badQty`: int ≥ 0 or null. Absent on create = null.
+- `status` (read-only): `"attention"` if badQty > 0, `"ok"` if goodQty > 0 and badQty is 0/null, otherwise `"unchecked"`.
+- `countsMismatch` (read-only): true only when quantity, goodQty and badQty are all numbers and good + bad ≠ quantity.
+- `contents`: `[{ name, quantity|null }]`, **always an array** (`[]` when none). At most 100 entries. On write: an array or null; null clears it.
+- **`condition` is no longer returned.**
+  - It is still accepted on POST/PUT for backward compatibility and turned into counts using the item's quantity: `good` → good = quantity, bad = 0; `needs_repair`/`damaged` → bad = quantity, good = 0; `written_off` → bad = quantity and " Written off" appended to notes.
+  - Explicit `goodQty`/`badQty` in the same request win. An invalid condition is still a 400.
+  - The DB column is kept (read-only history from Phase 1), and new rows leave it NULL.
+
+**Migration v4** rebuilds `items` (ids kept):
+- `code` and `quantity` become nullable.
+- New columns `level`, `compartment`, `good_qty`, `bad_qty`, `contents` (JSON).
+- Counts are filled from the old `condition` using the rule above.
+- Every location is re-parsed with the v2-aware parser.
+- New table `compartments(code PK, rack, level, compartment, created_at)` is filled from existing v2 item locations.
+
+**GET /api/items:**
+- `q` also matches locations: `AU0305` / `au 03 05` (that compartment), `AU03` (whole level), `AU` or `au` (whole rack); legacy forms as before. A location query also returns items whose text fields contain it.
+- A location with digits never matches as plain location text (so R03-B-1 ≠ R03-B-10). Letters alone also match location text (`cup` finds "Store cupboard").
+- Ranking: exact code / exact barcode, exact location, code prefix, name prefix, then others.
+- **`status=attention|ok|unchecked`** filters. **`condition=<anything non-empty>` → 400** ("replaced by status"); `condition=` (empty) is ignored.
+- Default order without `q`: items with a code first (by code), then by locationCode, then by name.
+
+**GET /api/racks** → `{ racks: [...], unlocated }`, sorted by rack id (natural order: `AU, AX, R02, R10, R100`).
+- v2 rack entry: `{ rack, levels, compartments, emptyCompartments, itemCount }`.
+  - `levels` = number of distinct levels.
+  - `compartments` = known compartments: the layout table plus item codes.
+  - `emptyCompartments` = compartments with no items.
+- Legacy rack entry: `{ rack, levels, compartments, emptyCompartments: 0, itemCount, shelves: ["A", ...] }`, where `levels` = number of shelves and `compartments` = distinct shelf + bin places.
+
+**GET /api/racks/:rack** (accepts `AU`, `au`, `Rack AU`; legacy `R03`, `r3`, `3`):
+- **v2:** `{ rack, levels: [{ level, compartments: [{ code, compartment, items: Item[] }] }], unshelved: Item[] }`
+  - Levels are sorted **descending** (top first, level 01 last); compartments ascending.
+  - Empty compartments are included with `items: []`. Items within a compartment are sorted by name.
+  - `unshelved` = items in the rack with only a rack or rack + level location (`AU`, `AU03`).
+- **Legacy:** `{ rack, shelves: [{ shelf, items }], unshelved }` (unchanged).
+- 404 when the rack has neither items nor known compartments. 400 when the value is not a rack id (e.g. `AU0305`, `R03-B`).
+
+**DELETE /api/compartments/:code** (leader PIN): removes an **empty** compartment from the layout.
+- 204 when removed; 409 if items are still there (`details.items`); 404 if unknown; 400 if not a full code like AU0305.
+- Compartments are added automatically whenever an item is saved at a full v2 code, and for every full code in an import (including empty rows).
+
+**POST /api/import** (real-format file):
+- **Header row:** found in the first 20 rows; only a **name** column is required now (`missingColumns` can only be `["name"]`).
+- **New header aliases:** `item description` → name; `good condition` / `good` / `baik` → goodQty; `bad condition` / `bad` / `rosak` → badQty.
+- **CODE as location:** CODE is used as the location when there is no location/rack column and ≥ 80% of its non-empty values (section rows excluded) are compact v2 codes (`AU0305`, `ax0304`, `AU 0305`). `columns` then shows `location` instead of `code`, and items are created with `code: null`.
+- **Row types:**
+  - A row whose only cell is `RACK AU` / `Rak AU` counts in **`sections`**.
+  - A row with a full v2 location and nothing else counts in **`emptyCompartments`** (a count) and creates the compartment (real run only).
+  - A row without a name but with other data → error "Missing name (item description); row skipped".
+  - A missing code is never an error.
+- **Upsert key:**
+  - The item code when the row has one; later rows with the same code are applied on top, with a warning (as before).
+  - Otherwise **location + folded name** (lower-case, spaces collapsed). For the same location + name again, the first row is kept and the later one is ignored, with `Warning: duplicate row (AY0204 Gas) ignored — check the Excel (first seen on row N)`. Such rows are **not** counted in `skipped`.
+  - On an update the file's spelling of the name wins (tidied).
+- **Quantity text:**
+  - `a/an/one <unit>` → 1; `<n> <unit words>` → n + unit (unit lower-cased, used when the Unit cell is blank).
+  - A trailing bracket (`2 box(24)`) → 2 `box` plus the note `Excel quantity: 2 box(24)`, added to notes once (re-imports don't duplicate it).
+  - Unreadable → existing item unchanged, new item `quantity: null`, a warning, and `Excel quantity: <raw>` in notes.
+  - Blank Quantity cell on a new item → `quantity: null` + `Warning: quantity missing` (no warning for existing items: a blank never changes them).
+  - Good/Bad cells use the number part only; unreadable → warning, value unchanged.
+- **Count warnings:** `Warning: counts don't add up (quantity 2, good -, bad 4)` when the row gives counts, quantity is a number, at least one of good/bad is present, and (good ?? 0) + (bad ?? 0) ≠ quantity.
+- **Tidy** (not reported): trim and collapse spaces (notes keep their line breaks); capitalise the first letter of names. Location codes are upper-cased by the parser.
+- **`corrections`:** `[{ row, field, from, to }]`.
+  - `field` ∈ `name`, `category`, `notes`, `quantity`, `goodQty`, `badQty`, plus `contents` for kit sheets (those entries also have `sheet`).
+  - `from` = the original trimmed cell; `to` = the corrected text before capitalisation.
+  - The word list is in `backend/src/lib/corrections.js` (`CORRECTIONS`).
+- **`kits`:** `[{ name, items, appliedTo }]`.
+  - Any non-main sheet whose title equals (case-insensitive, folded) the name of an item **in this import** and that has a name column becomes the `contents` of every such item.
+  - Contents names are tidied and corrected; quantity is the number part or null.
+  - The main sheet is the first visible sheet whose header has name + (code or location).
+- **Response keys:** `dryRun, created, updated, unchanged, skipped, errors, preview, headerRow, columns, ignoredColumns, sections, emptyCompartments, corrections, kits`.
+- **Preview entries:** `row, action, id, code, name, category, locationCode, rack, level, compartment, shelf, bin, quantity, unit, goodQty, badQty, status, countsMismatch, notes, brand, model, barcode, contents`.
+- The legacy `Condition`/`Keadaan` column still works and is turned into counts. An unknown value → warning, counts unchanged.
+
+**POST /api/scan/match:**
+- OCR text containing a compartment code (`AU0305`, `AU 0305`, `AU-03-05`; OCR `O` read as `0`) matches **every item in that compartment**: `score: 1`, `matchedOn: ["location"]`, plus any other fields that also matched.
+- Item-code matching still works for items that have a code. Ties are broken by code, location, then name.
+
+**Template** (`GET /api/import/template`):
+- Columns `Location, Item description, Quantity, Unit, Good, Bad, Brand, Model, Barcode, Notes`.
+- Two example rows in rack `EX` (`EX0101`, `EX0102`), plus a help sheet (including kits).
+
+**Seed** (`npm run seed`): 31 demo items in racks BA–BD (3–4 levels each), shared compartments, 8 empty compartments, several bad counts, and two Patrol Box items with contents. No item codes.

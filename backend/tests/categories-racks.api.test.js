@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { makeApp, createItems, expectItemShape, expectErrorShape } from './helpers.js';
-import { SEED_ITEMS } from '../scripts/seed.js';
+import { LEGACY_SEED_ITEMS as SEED_ITEMS } from './fixtures/legacy-seed.js'; // Phase 1 demo data (the app seed changed in 1.6)
 
 describe('GET /api/categories', () => {
   it('empty DB -> { categories: [] }', async () => {
@@ -75,11 +75,12 @@ describe('GET /api/racks', () => {
     const res = await request(app).get('/api/racks');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
+      // Phase 1.6 shape: legacy racks report levels = shelves, compartments = shelf+bin places, plus `shelves`
       racks: [
-        { rack: 'R02', shelves: ['D'], itemCount: 1 },
-        { rack: 'R03', shelves: ['A', 'B'], itemCount: 4 },
-        { rack: 'R10', shelves: ['C'], itemCount: 1 },
-        { rack: 'R100', shelves: ['A'], itemCount: 1 },
+        { rack: 'R02', levels: 1, compartments: 1, emptyCompartments: 0, itemCount: 1, shelves: ['D'] },
+        { rack: 'R03', levels: 2, compartments: 3, emptyCompartments: 0, itemCount: 4, shelves: ['A', 'B'] },
+        { rack: 'R10', levels: 1, compartments: 1, emptyCompartments: 0, itemCount: 1, shelves: ['C'] },
+        { rack: 'R100', levels: 1, compartments: 1, emptyCompartments: 0, itemCount: 1, shelves: ['A'] },
       ],
       unlocated: 2,
     });
@@ -88,7 +89,7 @@ describe('GET /api/racks', () => {
   it('rack with only rack-level items has shelves []', async () => {
     const { app } = makeApp();
     await createItems(app, [{ code: 'A', name: 'a', locationCode: 'R07' }]);
-    expect((await request(app).get('/api/racks')).body.racks).toEqual([{ rack: 'R07', shelves: [], itemCount: 1 }]);
+    expect((await request(app).get('/api/racks')).body.racks).toEqual([{ rack: 'R07', levels: 0, compartments: 0, emptyCompartments: 0, itemCount: 1, shelves: [] }]);
   });
 
   it('seed data: R01..R06, shelves A-D', async () => {
@@ -142,7 +143,12 @@ describe('GET /api/racks/:rack', () => {
     expectErrorShape(expect, res.body);
   });
 
-  it.each(['abc', 'R03-B', 'R', 'R1234'])('not a rack %s -> 400', async (rack) => {
+  // Phase 1.6: "abc" and "R" are valid v2 rack ids now (1-3 letters) -> 404 when the rack is unknown
+  it.each(['abc', 'R'])('unknown v2 rack %s -> 404', async (rack) => {
+    expect((await request(app).get(`/api/racks/${rack}`)).status).toBe(404);
+  });
+
+  it.each(['R03-B', 'R1234', 'AU0305'])('not a rack %s -> 400', async (rack) => {
     const res = await request(app).get(`/api/racks/${rack}`);
     expect(res.status).toBe(400);
     expectErrorShape(expect, res.body);
